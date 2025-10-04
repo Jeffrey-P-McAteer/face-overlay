@@ -7,10 +7,10 @@ mod mouse_tracker;
 use anyhow::{Context, Result};
 use cli::Args;
 use mouse_tracker::MouseEventHandler;
-use segmentation::{download_model_if_needed, SegmentationModel};
+use segmentation::{download_model_if_needed, read_hf_token_from_file, SegmentationModel};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use wayland_overlay::{AnchorPosition, WaylandOverlay};
 use webcam::WebcamCapture;
 
@@ -32,17 +32,31 @@ async fn main() -> Result<()> {
 }
 
 async fn run_application(args: Args) -> Result<()> {
+    info!("Initializing face overlay application...");
+    
+    // Read Hugging Face token if provided
+    let hf_token = if let Some(token_file) = &args.hf_token_file {
+        match read_hf_token_from_file(token_file) {
+            Ok(token) => {
+                info!("Successfully loaded Hugging Face token from {}", token_file);
+                Some(token)
+            }
+            Err(e) => {
+                warn!("Failed to read Hugging Face token: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    
     let model_path = if args.model_path.is_some() {
         args.get_model_path()
     } else {
-        match download_model_if_needed() {
-            Ok(path) => path,
-            Err(e) => {
-                warn!("Model setup failed: {}", e);
-                warn!("Continuing without AI segmentation (will show raw webcam feed)");
-                std::path::PathBuf::new()
-            }
-        }
+        download_model_if_needed(hf_token, args.disable_download).await.unwrap_or_else(|e| {
+            debug!("Model setup failed: {}", e);
+            std::path::PathBuf::new()
+        })
     };
 
     let mut webcam = WebcamCapture::new(Some(&args.device))
@@ -55,12 +69,12 @@ async fn run_application(args: Args) -> Result<()> {
                 Some(model)
             }
             Err(e) => {
-                warn!("Failed to load segmentation model: {}", e);
-                warn!("Continuing without AI segmentation");
+                debug!("Failed to load segmentation model: {}", e);
                 None
             }
         }
     } else {
+        debug!("No AI segmentation model available, using raw video feed");
         None
     };
 

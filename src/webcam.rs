@@ -1,7 +1,7 @@
 use anyhow::Result;
 use image::{ImageBuffer, Rgb, RgbImage};
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 pub struct WebcamCapture {
     width: u32,
@@ -14,7 +14,7 @@ impl WebcamCapture {
         let device = device_path.unwrap_or("/dev/video0");
         
         if !Path::new(device).exists() {
-            warn!("Webcam device {} not found, creating simulated capture", device);
+            debug!("Webcam device {} not found, creating simulated capture", device);
         } else {
             info!("Using webcam device: {}", device);
         }

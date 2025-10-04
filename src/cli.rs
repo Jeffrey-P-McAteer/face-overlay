@@ -29,6 +29,18 @@ pub struct Args {
     pub model_path: Option<String>,
 
     #[arg(
+        long = "hf-token-file",
+        help = "Path to file containing Hugging Face access token (for private models)"
+    )]
+    pub hf_token_file: Option<String>,
+
+    #[arg(
+        long = "disable-download",
+        help = "Disable automatic model download"
+    )]
+    pub disable_download: bool,
+
+    #[arg(
         short = 'w',
         long = "width",
         default_value = "640",

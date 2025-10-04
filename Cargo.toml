@@ -24,7 +24,8 @@ clap = { version = "4.4", features = ["derive"] }
 
 # Async runtime and HTTP client
 tokio = { version = "1.0", features = ["full"] }
-reqwest = { version = "0.12", features = ["stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = "0.3"
 
 # Error handling
 anyhow = "1.0"
