@@ -7,17 +7,6 @@ edition = "2024"
 name = "face_overlay"
 path = "src/lib.rs"
 
-# [[bin]]
-# name = "performance_test"
-# path = "performance_test.rs"
-
-# [[bin]]
-# name = "simple_performance_test"
-# path = "simple_performance_test.rs"
-
-# [[bin]]
-# name = "test_dimension_fix"
-# path = "test_dimension_fix.rs"
 
 [dependencies]
 # Webcam capture

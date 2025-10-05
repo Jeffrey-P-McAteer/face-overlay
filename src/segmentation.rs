@@ -60,24 +60,20 @@ impl MaskCache {
         }
     }
     
+    pub fn target_dimensions(&self) -> (u32, u32) {
+        (self.target_width, self.target_height)
+    }
+    
     pub fn add_mask(&mut self, mask: ImageBuffer<image::Luma<u8>, Vec<u8>>) {
         if self.masks.len() >= self.max_size {
             self.masks.pop_front();
         }
         
-        // Ensure mask dimensions match target dimensions before caching
-        let resized_mask = if mask.dimensions() != (self.target_width, self.target_height) {
-            image::imageops::resize(
-                &mask,
-                self.target_width,
-                self.target_height,
-                image::imageops::FilterType::Nearest
-            )
-        } else {
-            mask
-        };
+        // Masks should already be at target resolution
+        debug_assert_eq!(mask.dimensions(), (self.target_width, self.target_height), 
+                        "Mask dimensions should match target dimensions");
         
-        self.masks.push_back(resized_mask);
+        self.masks.push_back(mask);
     }
     
     pub fn get_interpolated_mask(&self) -> Option<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
@@ -158,17 +154,30 @@ impl SegmentationModel {
     ) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
         let (orig_width, orig_height) = image.dimensions();
         
+        // Scale input image to target resolution for performance
+        let (target_width, target_height) = self.mask_cache.target_dimensions();
+        let scaled_image = if (orig_width, orig_height) != (target_width, target_height) {
+            image::imageops::resize(
+                image,
+                target_width,
+                target_height,
+                image::imageops::FilterType::Nearest, // Fast resize for performance
+            )
+        } else {
+            image.clone()
+        };
+        
         // Increment frame counter
         self.frame_skip_counter += 1;
         
         // Decide whether to run AI inference or use cached mask
         let mask = if self.frame_skip_counter % self.ai_inference_interval == 0 {
-            // Run AI inference
+            // Run AI inference on scaled image
             let start_time = std::time::Instant::now();
-            let new_mask = self.run_ai_inference(image)?;
+            let new_mask = self.run_ai_inference(&scaled_image)?;
             let inference_time = start_time.elapsed();
             
-            // Cache the new mask
+            // Cache the new mask (already at target resolution)
             self.mask_cache.add_mask(new_mask.clone());
             
             tracing::debug!("AI inference completed in {:.2}ms", inference_time.as_secs_f64() * 1000.0);
@@ -183,19 +192,30 @@ impl SegmentationModel {
                 None => {
                     // No cached mask available, run inference
                     tracing::debug!("No cached mask available, running inference");
-                    let new_mask = self.run_ai_inference(image)?;
+                    let new_mask = self.run_ai_inference(&scaled_image)?;
                     self.mask_cache.add_mask(new_mask.clone());
                     new_mask
                 }
             }
         };
 
-        // Apply mask to create RGBA image with transparency
-        let segmented = self.apply_cached_mask(image, &mask)?;
+        // Apply mask to scaled image and then scale result back to original if needed
+        let scaled_segmented = self.apply_cached_mask(&scaled_image, &mask)?;
+        
+        let final_result = if (orig_width, orig_height) != (target_width, target_height) {
+            image::imageops::resize(
+                &scaled_segmented,
+                orig_width,
+                orig_height,
+                image::imageops::FilterType::Nearest, // Fast resize for performance
+            )
+        } else {
+            scaled_segmented
+        };
         
         tracing::debug!("Segmentation completed for {}x{} image", orig_width, orig_height);
         
-        Ok(segmented)
+        Ok(final_result)
     }
     
     fn run_ai_inference(&mut self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
@@ -226,10 +246,23 @@ impl SegmentationModel {
             Self::extract_mask_from_outputs_static(&outputs, &model_type, &output_name)?
         };
         
-        // Convert to grayscale mask
+        // Convert to grayscale mask at AI model resolution
         let mask_image = Self::create_mask_image_static(&mask_data, self.input_width, self.input_height)?;
         
-        Ok(mask_image)
+        // Resize mask to target resolution for consistency
+        let (target_width, target_height) = self.mask_cache.target_dimensions();
+        let final_mask = if (mask_image.width(), mask_image.height()) != (target_width, target_height) {
+            image::imageops::resize(
+                &mask_image,
+                target_width,
+                target_height,
+                image::imageops::FilterType::Nearest, // Fast resize for performance
+            )
+        } else {
+            mask_image
+        };
+        
+        Ok(final_mask)
     }
     
     fn preprocess_image_fast(&self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<Vec<f32>> {
