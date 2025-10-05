@@ -3,6 +3,10 @@ name = "face-overlay"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "face_overlay"
+path = "src/lib.rs"
+
 [dependencies]
 # Webcam capture
 nokhwa = { version = "0.10", features = ["input-v4l"] }

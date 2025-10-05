@@ -154,23 +154,23 @@ async fn process_frame(
                 segmented
             },
             Err(e) => {
-                warn!("Segmentation failed: {}, using raw frame with transparency", e);
-                // Convert to RGBA with partial transparency to show it's not segmented
+                warn!("Segmentation failed: {}, using raw frame with full visibility", e);
+                // Convert to RGBA with full opacity - show entire frame when segmentation fails
                 let (width, height) = frame.dimensions();
                 let mut rgba_frame = image::ImageBuffer::new(width, height);
                 for (x, y, pixel) in frame.enumerate_pixels() {
-                    rgba_frame.put_pixel(x, y, image::Rgba([pixel[0], pixel[1], pixel[2], 200])); // 78% opacity
+                    rgba_frame.put_pixel(x, y, image::Rgba([pixel[0], pixel[1], pixel[2], 255])); // Full opacity
                 }
                 rgba_frame
             }
         }
     } else {
-        debug!("No AI model available, using raw frame with transparency");
+        debug!("No AI model available, using raw frame with full visibility");
         let (width, height) = frame.dimensions();
         let mut rgba_frame = image::ImageBuffer::new(width, height);
         for (x, y, pixel) in frame.enumerate_pixels() {
-            // Use semi-transparent overlay when no AI segmentation is available
-            rgba_frame.put_pixel(x, y, image::Rgba([pixel[0], pixel[1], pixel[2], 180])); // 70% opacity
+            // Use full opacity when no AI segmentation is available - show entire frame
+            rgba_frame.put_pixel(x, y, image::Rgba([pixel[0], pixel[1], pixel[2], 255])); // Full opacity
         }
         rgba_frame
     };

@@ -19,9 +19,17 @@ impl SegmentationModel {
     pub fn new(model_path: &Path) -> Result<Self> {
         tracing::info!("Loading AI segmentation model from: {:?}", model_path);
         
+        if !model_path.exists() {
+            anyhow::bail!("Model file does not exist at path: {:?}", model_path);
+        }
+        
         let session = Session::builder()?
             .commit_from_file(model_path)
             .context("Failed to load ONNX model - make sure the model file is valid")?;
+        
+        // Debug: Print model input/output info
+        tracing::debug!("Model inputs: {:?}", session.inputs.iter().map(|i| &i.name).collect::<Vec<_>>());
+        tracing::debug!("Model outputs: {:?}", session.outputs.iter().map(|o| &o.name).collect::<Vec<_>>());
 
         // Get input dimensions from the model - default to 320x320 for U2-Net
         let input_height = 320;
@@ -58,15 +66,42 @@ impl SegmentationModel {
         
         // Run inference and extract mask data
         let mask_data = {
-            let outputs = self.session.run(ort::inputs!["input" => input_tensor])
+            // Use the first available input name from the model
+            let input_name = self.session.inputs[0].name.clone();
+            let output_name = self.session.outputs[0].name.clone();
+            
+            tracing::debug!("Using input tensor name: {}", input_name);
+            tracing::debug!("Using output tensor name: {}", output_name);
+            
+            let inputs = vec![(input_name, input_tensor)];
+            let outputs = self.session.run(inputs)
                 .context("Failed to run model inference")?;
             
-            // Extract mask from output
-            let output_tensor = outputs["output"].try_extract_tensor::<f32>()?;
-            let (_, mask_slice) = output_tensor;
+            let output_tensor = outputs.get(output_name)
+                .context("Output tensor not found")?
+                .try_extract_tensor::<f32>()?;
+            let (shape, mask_slice) = output_tensor;
             
-            // Convert slice to ndarray for processing
-            Array::from_shape_vec((1, 1, self.input_height, self.input_width), mask_slice.to_vec())?
+            tracing::debug!("Output tensor shape: {:?}", shape);
+            
+            // Convert slice to ndarray for processing - U2-Net outputs single channel masks
+            // The output might be different shape, so let's use the actual output dimensions
+            let output_size = mask_slice.len();
+            let expected_size = self.input_height * self.input_width;
+            
+            if output_size == expected_size {
+                Array::from_shape_vec((1, 1, self.input_height, self.input_width), mask_slice.to_vec())?
+            } else {
+                // Handle different output shapes (e.g., batch, channels, height, width)
+                let sqrt_size = (output_size as f64).sqrt() as usize;
+                if sqrt_size * sqrt_size == output_size {
+                    Array::from_shape_vec((1, 1, sqrt_size, sqrt_size), mask_slice.to_vec())?
+                } else {
+                    // Fallback: try to reshape based on expected input dimensions
+                    Array::from_shape_vec((1, 1, self.input_height, self.input_width), 
+                        mask_slice.into_iter().take(expected_size).cloned().collect())?
+                }
+            }
         };
 
         // Post-process mask and apply to original image
