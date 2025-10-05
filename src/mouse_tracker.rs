@@ -42,7 +42,9 @@ impl MouseTracker {
             if let Some(overlap_start) = self.last_overlap_time {
                 if overlap_start.elapsed() >= self.flip_delay && !self.should_flip {
                     self.should_flip = true;
-                    debug!("Mouse overlap duration exceeded flip delay, should flip overlay");
+                    debug!("🔄 Mouse dwell detected: {}ms >= {}ms, triggering auto-flip", 
+                           overlap_start.elapsed().as_millis(), 
+                           self.flip_delay.as_millis());
                     return true;
                 }
             }
@@ -61,38 +63,18 @@ impl MouseTracker {
 }
 
 #[cfg(target_os = "linux")]
-pub struct WaylandMousePosition {
-    mouse_x: i32,
-    mouse_y: i32,
-}
+pub struct WaylandMousePosition;
 
 #[cfg(target_os = "linux")]
 impl WaylandMousePosition {
     pub fn new() -> Result<Self> {
-        Ok(Self {
-            mouse_x: 0,
-            mouse_y: 0,
-        })
+        Ok(Self)
     }
 
     pub fn get_position(&mut self) -> Result<(i32, i32)> {
-
-        match self.read_mouse_position_from_proc() {
-            Ok((x, y)) => {
-                self.mouse_x = x;
-                self.mouse_y = y;
-                Ok((x, y))
-            }
-            Err(_) => {
-                warn!("Unable to read mouse position, using cached values");
-                Ok((self.mouse_x, self.mouse_y))
-            }
-        }
-    }
-
-    fn read_mouse_position_from_proc(&self) -> Result<(i32, i32)> {
-        // Simplified implementation - real implementation would parse input events
-        Ok((self.mouse_x, self.mouse_y))
+        // Position is now tracked directly in WaylandOverlay via seat protocol
+        // This will be fetched through the overlay reference in MouseEventHandler
+        Ok((0, 0)) // Placeholder - actual position comes from overlay
     }
 }
 
@@ -134,7 +116,7 @@ impl MouseEventHandler {
         })
     }
 
-    pub fn check_for_flip(&mut self, overlay_bounds: Option<(i32, i32, i32, i32)>) -> bool {
+    pub fn check_for_flip(&mut self, overlay_bounds: Option<(i32, i32, i32, i32)>, mouse_position: (i32, i32)) -> bool {
         if !self.enabled {
             return false;
         }
@@ -143,13 +125,8 @@ impl MouseEventHandler {
             return false;
         };
 
-        match self.position_reader.get_position() {
-            Ok((x, y)) => self.tracker.update_mouse_position(x, y, bounds),
-            Err(e) => {
-                debug!("Failed to get mouse position: {}", e);
-                false
-            }
-        }
+        // Use mouse position from Wayland seat protocol via overlay
+        self.tracker.update_mouse_position(mouse_position.0, mouse_position.1, bounds)
     }
 
     pub fn reset_flip_state(&mut self) {

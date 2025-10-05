@@ -230,7 +230,8 @@ async fn process_frame(
         })
     };
 
-    if mouse_handler.check_for_flip(overlay.get_surface_bounds()) {
+    let mouse_position = overlay.get_mouse_position();
+    if mouse_handler.check_for_flip(overlay.get_surface_bounds(), mouse_position) {
         let current_anchor = overlay.get_anchor_position();
         let new_anchor = match current_anchor {
             AnchorPosition::LowerLeft => AnchorPosition::LowerRight,
@@ -238,7 +239,15 @@ async fn process_frame(
         };
         overlay.set_anchor_position(new_anchor, qh);
         mouse_handler.reset_flip_state();
-        info!("Flipped overlay to opposite side due to mouse overlap");
+        info!("🔄 Auto-flipped overlay from {} to {} after 1000ms mouse dwell", 
+              match current_anchor {
+                  AnchorPosition::LowerLeft => "lower-left",
+                  AnchorPosition::LowerRight => "lower-right",
+              },
+              match new_anchor {
+                  AnchorPosition::LowerLeft => "lower-left", 
+                  AnchorPosition::LowerRight => "lower-right",
+              });
     }
 
     overlay.update_frame(&processed_frame, &qh)
