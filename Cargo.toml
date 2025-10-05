@@ -15,6 +15,10 @@ path = "src/lib.rs"
 # name = "simple_performance_test"
 # path = "simple_performance_test.rs"
 
+# [[bin]]
+# name = "test_dimension_fix"
+# path = "test_dimension_fix.rs"
+
 [dependencies]
 # Webcam capture
 nokhwa = { version = "0.10", features = ["input-v4l"] }

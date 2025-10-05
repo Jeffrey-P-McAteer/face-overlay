@@ -64,7 +64,20 @@ impl MaskCache {
         if self.masks.len() >= self.max_size {
             self.masks.pop_front();
         }
-        self.masks.push_back(mask);
+        
+        // Ensure mask dimensions match target dimensions before caching
+        let resized_mask = if mask.dimensions() != (self.target_width, self.target_height) {
+            image::imageops::resize(
+                &mask,
+                self.target_width,
+                self.target_height,
+                image::imageops::FilterType::Nearest
+            )
+        } else {
+            mask
+        };
+        
+        self.masks.push_back(resized_mask);
     }
     
     pub fn get_interpolated_mask(&self) -> Option<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
