@@ -6,9 +6,95 @@ use std::collections::VecDeque;
 
 // use ndarray::Array;
 use ort::{
-    session::{Session, SessionOutputs},
+    session::{Session, SessionOutputs, builder::GraphOptimizationLevel},
     value::Value,
 };
+
+#[cfg(feature = "cuda")]
+use ort::execution_providers::CUDAExecutionProvider;
+
+#[cfg(feature = "tensorrt")]
+use ort::execution_providers::TensorRTExecutionProvider;
+
+#[cfg(feature = "rocm")]
+use ort::execution_providers::ROCmExecutionProvider;
+
+pub fn detect_ai_accelerators() -> Result<Vec<String>> {
+    let mut available_accelerators = Vec::new();
+    
+    tracing::info!("🔍 Detecting AI accelerator hardware...");
+    
+    // Test CUDA (NVIDIA GPUs)
+    if test_cuda_availability() {
+        available_accelerators.push("CUDA (NVIDIA GPU)".to_string());
+        tracing::info!("✅ CUDA (NVIDIA GPU) - Available");
+    } else {
+        tracing::info!("❌ CUDA (NVIDIA GPU) - Not available");
+    }
+    
+    // Test TensorRT (NVIDIA GPUs with TensorRT)
+    if test_tensorrt_availability() {
+        available_accelerators.push("TensorRT (NVIDIA GPU)".to_string());
+        tracing::info!("✅ TensorRT (NVIDIA GPU) - Available");
+    } else {
+        tracing::info!("❌ TensorRT (NVIDIA GPU) - Not available");
+    }
+    
+    // Test ROCm (AMD GPUs)
+    if test_rocm_availability() {
+        available_accelerators.push("ROCm (AMD GPU)".to_string());
+        tracing::info!("✅ ROCm (AMD GPU) - Available");
+    } else {
+        tracing::info!("❌ ROCm (AMD GPU) - Not available");
+    }
+    
+    // CPU is always available
+    available_accelerators.push("CPU".to_string());
+    tracing::info!("✅ CPU - Available");
+    
+    if available_accelerators.len() == 1 {
+        tracing::warn!("⚠️  No GPU acceleration available - using CPU only");
+    } else {
+        tracing::info!("🚀 Found {} AI accelerator(s): {}", 
+                      available_accelerators.len(), 
+                      available_accelerators.join(", "));
+    }
+    
+    Ok(available_accelerators)
+}
+
+fn test_cuda_availability() -> bool {
+    #[cfg(feature = "cuda")]
+    {
+        true  // If CUDA feature is enabled, assume it's available
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        false
+    }
+}
+
+fn test_tensorrt_availability() -> bool {
+    #[cfg(feature = "tensorrt")]
+    {
+        true  // If TensorRT feature is enabled, assume it's available
+    }
+    #[cfg(not(feature = "tensorrt"))]
+    {
+        false
+    }
+}
+
+fn test_rocm_availability() -> bool {
+    #[cfg(feature = "rocm")]
+    {
+        true  // If ROCm feature is enabled, assume it's available
+    }
+    #[cfg(not(feature = "rocm"))]
+    {
+        false
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ModelType {
@@ -113,19 +199,18 @@ pub struct SegmentationModel {
 
 impl SegmentationModel {
     pub fn new(model_path: &Path, target_width: u32, target_height: u32) -> Result<Self> {
-        Self::new_with_options(model_path, target_width, target_height, ModelType::YoloV8nSeg, 3)
+        Self::new_with_options(model_path, target_width, target_height, ModelType::YoloV8nSeg, 3, false, None)
     }
     
-    pub fn new_with_options(model_path: &Path, target_width: u32, target_height: u32, model_type: ModelType, ai_inference_interval: u32) -> Result<Self> {
+    pub fn new_with_options(model_path: &Path, target_width: u32, target_height: u32, model_type: ModelType, ai_inference_interval: u32, force_cpu: bool, preferred_provider: Option<&str>) -> Result<Self> {
         tracing::info!("Loading AI segmentation model from: {:?} (type: {:?})", model_path, model_type);
         
         if !model_path.exists() {
             anyhow::bail!("Model file does not exist at path: {:?}", model_path);
         }
         
-        let session = Session::builder()?
-            .commit_from_file(model_path)
-            .context("Failed to load ONNX model - make sure the model file is valid")?;
+        // Try GPU acceleration first, fall back to CPU
+        let session = Self::create_optimized_session(model_path, force_cpu, preferred_provider)?;
         
         // Debug: Print model input/output info
         tracing::debug!("Model inputs: {:?}", session.inputs.iter().map(|i| &i.name).collect::<Vec<_>>());
@@ -263,6 +348,147 @@ impl SegmentationModel {
         };
         
         Ok(final_mask)
+    }
+    
+    fn create_optimized_session(model_path: &Path, force_cpu: bool, preferred_provider: Option<&str>) -> Result<Session> {
+        if force_cpu {
+            tracing::info!("🖥️  Forced CPU execution (GPU acceleration disabled)");
+            return Self::create_cpu_session(model_path);
+        }
+        
+        // Try specific provider if requested
+        if let Some(provider) = preferred_provider {
+            match provider.to_lowercase().as_str() {
+                "cpu" => {
+                    tracing::info!("🖥️  Preferred CPU execution");
+                    return Self::create_cpu_session(model_path);
+                }
+                "cuda" => {
+                    if let Ok(session) = Self::try_cuda_session(model_path) {
+                        return Ok(session);
+                    }
+                }
+                "tensorrt" => {
+                    if let Ok(session) = Self::try_tensorrt_session(model_path) {
+                        return Ok(session);
+                    }
+                }
+                "rocm" => {
+                    if let Ok(session) = Self::try_rocm_session(model_path) {
+                        return Ok(session);
+                    }
+                }
+                _ => {
+                    tracing::warn!("Unknown GPU provider '{}', trying auto-detection", provider);
+                }
+            }
+        }
+        
+        // Auto-detect GPU providers in order of preference for Nvidia GPUs
+        
+        // 1. Try TensorRT first (NVIDIA GPUs with TensorRT) - fastest for inference with lowest latency
+        if let Ok(session) = Self::try_tensorrt_session(model_path) {
+            return Ok(session);
+        }
+        
+        // 2. Try CUDA (NVIDIA GPUs) - most common, good performance
+        if let Ok(session) = Self::try_cuda_session(model_path) {
+            return Ok(session);
+        }
+        
+        // 3. Try ROCm (AMD GPUs)
+        if let Ok(session) = Self::try_rocm_session(model_path) {
+            return Ok(session);
+        }
+        
+        // 4. Fall back to CPU with optimizations
+        tracing::info!("🖥️  Using CPU execution (no GPU acceleration available)");
+        Self::create_cpu_session(model_path)
+    }
+    
+    #[cfg(feature = "cuda")]
+    fn try_cuda_session(model_path: &Path) -> Result<Session> {
+        match Session::builder()?
+            .with_execution_providers([
+                CUDAExecutionProvider::default()
+                    .with_device_id(0)  // Use primary GPU
+                    .build()
+            ])?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?  // Maximum optimization
+            .with_intra_threads(1)?  // Single thread for GPU to avoid overhead
+            .commit_from_file(model_path) {
+            Ok(session) => {
+                tracing::info!("🚀 GPU acceleration enabled: CUDA (low-latency optimized)");
+                Ok(session)
+            }
+            Err(e) => {
+                tracing::warn!("CUDA provider failed: {}", e);
+                Err(e.into())
+            }
+        }
+    }
+    
+    #[cfg(not(feature = "cuda"))]
+    fn try_cuda_session(_model_path: &Path) -> Result<Session> {
+        Err(anyhow::anyhow!("CUDA support not compiled"))
+    }
+    
+    #[cfg(feature = "tensorrt")]
+    fn try_tensorrt_session(model_path: &Path) -> Result<Session> {
+        match Session::builder()?
+            .with_execution_providers([
+                TensorRTExecutionProvider::default()
+                    .with_device_id(0)  // Use primary GPU
+                    .build()
+            ])?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?  // Maximum optimization
+            .with_intra_threads(1)?  // Single thread for GPU to avoid overhead
+            .commit_from_file(model_path) {
+            Ok(session) => {
+                tracing::info!("🚀 GPU acceleration enabled: TensorRT (ultra low-latency optimized)");
+                Ok(session)
+            }
+            Err(e) => {
+                tracing::warn!("TensorRT provider failed: {}", e);
+                Err(e.into())
+            }
+        }
+    }
+    
+    #[cfg(not(feature = "tensorrt"))]
+    fn try_tensorrt_session(_model_path: &Path) -> Result<Session> {
+        Err(anyhow::anyhow!("TensorRT support not compiled"))
+    }
+    
+    #[cfg(feature = "rocm")]
+    fn try_rocm_session(model_path: &Path) -> Result<Session> {
+        match Session::builder()?
+            .with_execution_providers([ROCmExecutionProvider::default().build()])?
+            .commit_from_file(model_path) {
+            Ok(session) => {
+                tracing::info!("🚀 GPU acceleration enabled: ROCm (AMD)");
+                Ok(session)
+            }
+            Err(e) => {
+                tracing::warn!("ROCm provider failed: {}", e);
+                Err(e.into())
+            }
+        }
+    }
+    
+    #[cfg(not(feature = "rocm"))]
+    fn try_rocm_session(_model_path: &Path) -> Result<Session> {
+        Err(anyhow::anyhow!("ROCm support not compiled"))
+    }
+    
+    fn create_cpu_session(model_path: &Path) -> Result<Session> {
+        let session = Session::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(num_cpus::get())?
+            .commit_from_file(model_path)
+            .context("Failed to load ONNX model - make sure the model file is valid")?;
+        
+        Ok(session)
     }
     
     fn preprocess_image_fast(&self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<Vec<f32>> {

@@ -109,6 +109,18 @@ pub struct Args {
         help = "Number of masks to cache for temporal smoothing"
     )]
     pub mask_cache_size: usize,
+
+    #[arg(
+        long = "force-cpu",
+        help = "Force CPU execution, disable GPU acceleration"
+    )]
+    pub force_cpu: bool,
+
+    #[arg(
+        long = "gpu-provider",
+        help = "Preferred GPU provider (cuda, tensorrt, rocm, cpu)"
+    )]
+    pub gpu_provider: Option<String>,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
