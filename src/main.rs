@@ -6,6 +6,7 @@ mod mouse_tracker;
 
 use anyhow::{Context, Result};
 use cli::Args;
+use image::ImageBuffer;
 use mouse_tracker::MouseEventHandler;
 use segmentation::{download_model_if_needed, read_hf_token_from_file, SegmentationModel, ModelType, detect_ai_accelerators};
 use std::time::{Duration, Instant};
@@ -82,7 +83,7 @@ async fn run_application(args: Args) -> Result<()> {
     }
 
     let mut segmentation_model = if model_path.exists() {
-        match SegmentationModel::new_with_options(&model_path, args.width, args.height, args.get_ai_model_type(), args.ai_inference_interval, args.force_cpu, args.gpu_provider.as_deref()) {
+        match SegmentationModel::new_with_options(&model_path, args.width, args.height, args.get_ai_model_type(), args.force_cpu, args.gpu_provider.as_deref()) {
             Ok(model) => {
                 info!("AI segmentation model loaded successfully");
                 Some(model)
@@ -97,7 +98,7 @@ async fn run_application(args: Args) -> Result<()> {
                 
                 if u2net_path.exists() && args.get_ai_model_type() != ModelType::U2Net {
                     info!("Falling back to U2-Net model");
-                    match SegmentationModel::new_with_options(&u2net_path, args.width, args.height, ModelType::U2Net, args.ai_inference_interval, args.force_cpu, args.gpu_provider.as_deref()) {
+                    match SegmentationModel::new_with_options(&u2net_path, args.width, args.height, ModelType::U2Net, args.force_cpu, args.gpu_provider.as_deref()) {
                         Ok(model) => {
                             info!("U2-Net fallback model loaded successfully");
                             Some(model)
@@ -120,7 +121,7 @@ async fn run_application(args: Args) -> Result<()> {
         
         if u2net_path.exists() {
             info!("No {} model found, falling back to U2-Net model", args.ai_model);
-            match SegmentationModel::new_with_options(&u2net_path, args.width, args.height, ModelType::U2Net, args.ai_inference_interval, args.force_cpu, args.gpu_provider.as_deref()) {
+            match SegmentationModel::new_with_options(&u2net_path, args.width, args.height, ModelType::U2Net, args.force_cpu, args.gpu_provider.as_deref()) {
                 Ok(model) => {
                     info!("U2-Net fallback model loaded successfully");
                     Some(model)
@@ -201,29 +202,32 @@ async fn process_frame(
     let processed_frame = if let Some(model) = segmentation_model {
         match model.segment_foreground(&frame) {
             Ok(segmented) => {
-                debug!("AI segmentation successful");
+                debug!("🚀 AI segmentation successful");
                 segmented
             },
             Err(e) => {
-                warn!("Segmentation failed: {}, using raw frame with full visibility", e);
-                // Convert to RGBA with full opacity - show entire frame when segmentation fails
+                error!("🚨 Critical AI segmentation failure: {}", e);
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                warn!("⚠️  Falling back to full visibility mode due to AI failure");
+                
+                // Efficient fallback: convert to RGBA with full opacity
                 let (width, height) = frame.dimensions();
-                let mut rgba_frame = image::ImageBuffer::new(width, height);
-                for (x, y, pixel) in frame.enumerate_pixels() {
-                    rgba_frame.put_pixel(x, y, image::Rgba([pixel[0], pixel[1], pixel[2], 255])); // Full opacity
-                }
-                rgba_frame
+                ImageBuffer::from_fn(width, height, |x, y| {
+                    let pixel = frame.get_pixel(x, y);
+                    image::Rgba([pixel[0], pixel[1], pixel[2], 255]) // Full opacity
+                })
             }
         }
     } else {
-        debug!("No AI model available, using raw frame with full visibility");
+        error!("🚨 No AI model available - this should not happen with efficient design!");
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        
+        // Efficient fallback: full opacity
         let (width, height) = frame.dimensions();
-        let mut rgba_frame = image::ImageBuffer::new(width, height);
-        for (x, y, pixel) in frame.enumerate_pixels() {
-            // Use full opacity when no AI segmentation is available - show entire frame
-            rgba_frame.put_pixel(x, y, image::Rgba([pixel[0], pixel[1], pixel[2], 255])); // Full opacity
-        }
-        rgba_frame
+        ImageBuffer::from_fn(width, height, |x, y| {
+            let pixel = frame.get_pixel(x, y);
+            image::Rgba([pixel[0], pixel[1], pixel[2], 255]) // Full opacity
+        })
     };
 
     if mouse_handler.check_for_flip(overlay.get_surface_bounds()) {

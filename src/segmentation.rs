@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use image::{ImageBuffer, Rgb, Rgba};
 use std::path::Path;
-use std::collections::VecDeque;
+// Removed VecDeque import - no longer using inefficient caching
 
 // use ndarray::Array;
 use ort::{
@@ -176,80 +176,23 @@ impl ModelType {
     }
 }
 
-pub struct MaskCache {
-    masks: VecDeque<ImageBuffer<image::Luma<u8>, Vec<u8>>>,
-    max_size: usize,
-    target_width: u32,
-    target_height: u32,
-}
-
-impl MaskCache {
-    pub fn new(max_size: usize, target_width: u32, target_height: u32) -> Self {
-        Self {
-            masks: VecDeque::with_capacity(max_size),
-            max_size,
-            target_width,
-            target_height,
-        }
-    }
-    
-    pub fn target_dimensions(&self) -> (u32, u32) {
-        (self.target_width, self.target_height)
-    }
-    
-    pub fn add_mask(&mut self, mask: ImageBuffer<image::Luma<u8>, Vec<u8>>) {
-        if self.masks.len() >= self.max_size {
-            self.masks.pop_front();
-        }
-        
-        // Masks should already be at target resolution
-        debug_assert_eq!(mask.dimensions(), (self.target_width, self.target_height), 
-                        "Mask dimensions should match target dimensions");
-        
-        self.masks.push_back(mask);
-    }
-    
-    pub fn get_interpolated_mask(&self) -> Option<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
-        if self.masks.is_empty() {
-            return None;
-        }
-        
-        if self.masks.len() == 1 {
-            return Some(self.masks[0].clone());
-        }
-        
-        // Simple averaging of recent masks for temporal coherence
-        let mut result: ImageBuffer<image::Luma<u8>, Vec<u8>> = ImageBuffer::new(self.target_width, self.target_height);
-        let count = self.masks.len() as f32;
-        
-        for (x, y, pixel) in result.enumerate_pixels_mut() {
-            let mut sum = 0.0;
-            for mask in &self.masks {
-                sum += mask.get_pixel(x, y)[0] as f32;
-            }
-            pixel[0] = (sum / count) as u8;
-        }
-        
-        Some(result)
-    }
-}
+// Removed inefficient MaskCache system - AI runs on every frame for maximum responsiveness
 
 pub struct SegmentationModel {
     session: Session,
     input_height: usize,
     input_width: usize,
     model_type: ModelType,
-    mask_cache: MaskCache,
-    frame_skip_counter: u32,
-    ai_inference_interval: u32, // Process AI every N frames
+    // Pre-allocated buffer for AI data reuse and maximum efficiency
+    input_buffer: Vec<f32>,
 }
 
 impl SegmentationModel {
     pub fn new(model_path: &Path, target_width: u32, target_height: u32) -> Result<Self> {
-        Self::new_with_options(model_path, target_width, target_height, ModelType::MediaPipeSelfie, 3, false, None)
+        Self::new_with_options(model_path, target_width, target_height, ModelType::MediaPipeSelfie, false, None)
     }
     
-    pub fn new_with_options(model_path: &Path, target_width: u32, target_height: u32, model_type: ModelType, ai_inference_interval: u32, force_cpu: bool, preferred_provider: Option<&str>) -> Result<Self> {
+    pub fn new_with_options(model_path: &Path, _target_width: u32, _target_height: u32, model_type: ModelType, force_cpu: bool, preferred_provider: Option<&str>) -> Result<Self> {
         tracing::info!("Loading AI segmentation model from: {:?} (type: {:?})", model_path, model_type);
         
         if !model_path.exists() {
@@ -266,17 +209,18 @@ impl SegmentationModel {
         // Get input dimensions based on model type
         let (input_width, input_height) = model_type.input_size();
 
-        tracing::info!("AI model loaded successfully. Input size: {}x{}, AI inference every {} frames", 
-                      input_width, input_height, ai_inference_interval);
+        tracing::info!("🚀 AI model loaded successfully. Input size: {}x{}, running AI on EVERY frame for maximum responsiveness", 
+                      input_width, input_height);
+
+        // Pre-allocate buffer for maximum efficiency
+        let buffer_size = 3 * input_height * input_width;
 
         Ok(Self {
             session,
             input_height,
             input_width,
             model_type,
-            mask_cache: MaskCache::new(5, target_width, target_height), // Cache last 5 masks
-            frame_skip_counter: 0,
-            ai_inference_interval,
+            input_buffer: Vec::with_capacity(buffer_size),
         })
     }
 
@@ -284,117 +228,84 @@ impl SegmentationModel {
         &mut self,
         image: &ImageBuffer<Rgb<u8>, Vec<u8>>,
     ) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
-        let (orig_width, orig_height) = image.dimensions();
+        let start_time = std::time::Instant::now();
         
-        // Scale input image to target resolution for performance
-        let (target_width, target_height) = self.mask_cache.target_dimensions();
-        let scaled_image = if (orig_width, orig_height) != (target_width, target_height) {
-            image::imageops::resize(
-                image,
-                target_width,
-                target_height,
-                image::imageops::FilterType::Nearest, // Fast resize for performance
-            )
-        } else {
-            image.clone()
-        };
-        
-        // Increment frame counter
-        self.frame_skip_counter += 1;
-        
-        // Decide whether to run AI inference or use cached mask
-        let mask = if self.frame_skip_counter % self.ai_inference_interval == 0 {
-            // Run AI inference on scaled image
-            let start_time = std::time::Instant::now();
-            let new_mask = self.run_ai_inference(&scaled_image)?;
-            let inference_time = start_time.elapsed();
-            
-            // Cache the new mask (already at target resolution)
-            self.mask_cache.add_mask(new_mask.clone());
-            
-            tracing::debug!("AI inference completed in {:.2}ms", inference_time.as_secs_f64() * 1000.0);
-            new_mask
-        } else {
-            // Use cached mask with interpolation
-            match self.mask_cache.get_interpolated_mask() {
-                Some(cached_mask) => {
-                    tracing::debug!("Using cached mask (frame skip: {})", self.frame_skip_counter % self.ai_inference_interval);
-                    cached_mask
-                }
-                None => {
-                    // No cached mask available, run inference
-                    tracing::debug!("No cached mask available, running inference");
-                    let new_mask = self.run_ai_inference(&scaled_image)?;
-                    self.mask_cache.add_mask(new_mask.clone());
-                    new_mask
-                }
-            }
-        };
-
-        // Apply mask to scaled image and then scale result back to original if needed
-        let scaled_segmented = self.apply_cached_mask(&scaled_image, &mask)?;
-        
-        let final_result = if (orig_width, orig_height) != (target_width, target_height) {
-            image::imageops::resize(
-                &scaled_segmented,
-                orig_width,
-                orig_height,
-                image::imageops::FilterType::Nearest, // Fast resize for performance
-            )
-        } else {
-            scaled_segmented
-        };
-        
-        tracing::debug!("Segmentation completed for {}x{} image", orig_width, orig_height);
-        
-        Ok(final_result)
-    }
-    
-    fn run_ai_inference(&mut self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
-        // Fast resize with nearest neighbor for better performance
-        let resized = image::imageops::resize(
+        // Resize input to AI model size (MediaPipe Selfie: 256x256 for maximum speed)
+        let resized_image = image::imageops::resize(
             image,
             self.input_width as u32,
             self.input_height as u32,
-            image::imageops::FilterType::Nearest, // Much faster than Lanczos3
+            image::imageops::FilterType::Nearest, // Fastest resize method
         );
 
-        // Optimized preprocessing
-        let input_data = self.preprocess_image_fast(&resized)?;
+        // Run AI inference on EVERY frame for maximum responsiveness
+        let mask = match self.run_efficient_ai_inference(&resized_image) {
+            Ok(mask) => mask,
+            Err(e) => {
+                tracing::error!("⚠️  AI inference failed: {}", e);
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                
+                // Return fully transparent image on AI failure
+                let (width, height) = image.dimensions();
+                return Ok(ImageBuffer::from_fn(width, height, |_, _| image::Rgba([0, 0, 0, 0])));
+            }
+        };
+
+        // Apply mask directly to original image for best quality
+        let segmented = self.apply_mask_efficiently(image, &mask)?;
         
-        // Create input tensor
-        let input_tensor = Value::from_array(([1, 3, self.input_height, self.input_width], input_data))?;
+        let inference_time = start_time.elapsed();
+        tracing::debug!("🚀 AI segmentation completed in {:.2}ms", inference_time.as_secs_f64() * 1000.0);
         
-        // Run inference and extract mask data in a single scope
+        Ok(segmented)
+    }
+    
+    fn run_efficient_ai_inference(&mut self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
+        // Ultra-fast preprocessing with pre-allocated buffer reuse
+        self.preprocess_image_efficient(image)?;
+        
+        // Create input tensor with buffer reuse for maximum efficiency
+        let input_tensor = Value::from_array(([1, 3, self.input_height, self.input_width], self.input_buffer.clone()))?;
+        
+        // Run inference with minimal allocations
         let mask_data = {
             let input_name = self.session.inputs[0].name.clone();
             let output_name = self.session.outputs[0].name.clone();
             let model_type = self.model_type.clone();
             
             let outputs = self.session.run(vec![(input_name, input_tensor)])
-                .context("Failed to run model inference")?;
+                .context("🚨 AI model inference failed")?;
             
-            // Extract mask - use appropriate output based on model type
+            // Extract mask efficiently
             Self::extract_mask_from_outputs_static(&outputs, &model_type, &output_name)?
         };
         
-        // Convert to grayscale mask at AI model resolution
+        // Convert to mask image at model resolution (no unnecessary resizing)
         let mask_image = Self::create_mask_image_static(&mask_data, self.input_width, self.input_height)?;
         
-        // Resize mask to target resolution for consistency
-        let (target_width, target_height) = self.mask_cache.target_dimensions();
-        let final_mask = if (mask_image.width(), mask_image.height()) != (target_width, target_height) {
-            image::imageops::resize(
-                &mask_image,
-                target_width,
-                target_height,
-                image::imageops::FilterType::Nearest, // Fast resize for performance
-            )
-        } else {
-            mask_image
-        };
+        Ok(mask_image)
+    }
+    
+    fn apply_mask_efficiently(&self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>, mask: &ImageBuffer<image::Luma<u8>, Vec<u8>>) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+        let (width, height) = image.dimensions();
+        let (mask_width, mask_height) = mask.dimensions();
         
-        Ok(final_mask)
+        // Create output buffer efficiently
+        let mut result = ImageBuffer::new(width, height);
+        
+        // Apply mask with efficient pixel processing
+        for (x, y, pixel) in result.enumerate_pixels_mut() {
+            let rgb_pixel = image.get_pixel(x, y);
+            
+            // Scale mask coordinates efficiently
+            let mask_x = (x * mask_width / width).min(mask_width - 1);
+            let mask_y = (y * mask_height / height).min(mask_height - 1);
+            let alpha = mask.get_pixel(mask_x, mask_y)[0];
+            
+            *pixel = image::Rgba([rgb_pixel[0], rgb_pixel[1], rgb_pixel[2], alpha]);
+        }
+        
+        Ok(result)
     }
     
     fn create_optimized_session(model_path: &Path, force_cpu: bool, preferred_provider: Option<&str>) -> Result<Session> {
@@ -618,6 +529,70 @@ impl SegmentationModel {
         Ok(input_data)
     }
 
+    fn preprocess_image_efficient(&mut self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<()> {
+        // Clear and reuse the pre-allocated buffer for maximum efficiency
+        self.input_buffer.clear();
+        
+        // Optimized preprocessing specifically for MediaPipe Selfie (the default fast model)
+        match self.model_type {
+            ModelType::MediaPipeSelfie => {
+                // MediaPipe Selfie uses 0-1 normalization (RGB input, not BGR)
+                // Ultra-optimized loop with direct buffer writing
+                for c in 0..3 {
+                    for y in 0..self.input_height {
+                        for x in 0..self.input_width {
+                            let pixel = image.get_pixel(x as u32, y as u32);
+                            let value = pixel[c] as f32 / 255.0;
+                            self.input_buffer.push(value);
+                        }
+                    }
+                }
+            }
+            ModelType::SINet => {
+                // SINet uses ImageNet normalization
+                for c in 0..3 {
+                    for y in 0..self.input_height {
+                        for x in 0..self.input_width {
+                            let pixel = image.get_pixel(x as u32, y as u32);
+                            let value = pixel[c] as f32 / 255.0;
+                            
+                            let normalized = match c {
+                                0 => (value - 0.485) / 0.229, // Red channel
+                                1 => (value - 0.456) / 0.224, // Green channel  
+                                2 => (value - 0.406) / 0.225, // Blue channel
+                                _ => unreachable!(),
+                            };
+                            
+                            self.input_buffer.push(normalized);
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Default normalization for other models
+                for c in 0..3 {
+                    for y in 0..self.input_height {
+                        for x in 0..self.input_width {
+                            let pixel = image.get_pixel(x as u32, y as u32);
+                            let value = pixel[c] as f32 / 255.0;
+                            
+                            let normalized = match c {
+                                0 => (value - 0.485) / 0.229, // Red channel
+                                1 => (value - 0.456) / 0.224, // Green channel  
+                                2 => (value - 0.406) / 0.225, // Blue channel
+                                _ => unreachable!(),
+                            };
+                            
+                            self.input_buffer.push(normalized);
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
     fn extract_mask_from_outputs_static(outputs: &SessionOutputs, model_type: &ModelType, default_output_name: &str) -> Result<Vec<f32>> {
         match model_type {
             ModelType::YoloV8nSeg => {
@@ -688,50 +663,13 @@ impl SegmentationModel {
             .context("Failed to create mask image")
     }
     
-    fn apply_cached_mask(
-        &self,
-        original_image: &ImageBuffer<Rgb<u8>, Vec<u8>>,
-        mask: &ImageBuffer<image::Luma<u8>, Vec<u8>>,
-    ) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
-        let (img_width, img_height) = original_image.dimensions();
-        let (mask_width, mask_height) = mask.dimensions();
-        
-        // Resize mask to match image if needed
-        let resized_mask = if (mask_width, mask_height) != (img_width, img_height) {
-            image::imageops::resize(
-                mask,
-                img_width,
-                img_height,
-                image::imageops::FilterType::Nearest, // Fast resize
-            )
-        } else {
-            mask.clone()
-        };
-        
-        // Apply mask with optimized pixel operations
-        let mut result = ImageBuffer::new(img_width, img_height);
-        
-        for (x, y, pixel) in original_image.enumerate_pixels() {
-            let mask_pixel = resized_mask.get_pixel(x, y);
-            let alpha = mask_pixel[0]; // Use mask value as alpha
-            
-            result.put_pixel(
-                x,
-                y,
-                Rgba([pixel[0], pixel[1], pixel[2], alpha]),
-            );
-        }
-        
-        Ok(result)
-    }
+    // Removed old inefficient apply_cached_mask - replaced with apply_mask_efficiently
 
     pub fn input_dimensions(&self) -> (usize, usize) {
         (self.input_width, self.input_height)
     }
     
-    pub fn get_ai_inference_interval(&self) -> u32 {
-        self.ai_inference_interval
-    }
+    // Removed get_ai_inference_interval - AI now runs on EVERY frame
     
     pub fn get_model_type(&self) -> &ModelType {
         &self.model_type

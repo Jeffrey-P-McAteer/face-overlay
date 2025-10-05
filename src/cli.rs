@@ -96,19 +96,8 @@ pub struct Args {
     )]
     pub ai_model: String,
 
-    #[arg(
-        long = "ai-inference-interval",
-        default_value = "3",
-        help = "Run AI inference every N frames (higher = better performance, lower quality)"
-    )]
-    pub ai_inference_interval: u32,
-
-    #[arg(
-        long = "mask-cache-size",
-        default_value = "5",
-        help = "Number of masks to cache for temporal smoothing"
-    )]
-    pub mask_cache_size: usize,
+    // Removed ai_inference_interval - AI now runs on EVERY frame for maximum responsiveness
+    // Removed mask_cache_size - no more inefficient caching system
 
     #[arg(
         long = "force-cpu",
