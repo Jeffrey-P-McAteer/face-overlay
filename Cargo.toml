@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# Webcam capture (simplified for demo)
-# nokhwa = { version = "0.10", features = ["input-v4l"] }
+# Webcam capture (optional)
+nokhwa = { version = "0.10", features = ["input-v4l"], optional = true }
 
-# AI/ML inference (optional, will be disabled if unavailable)
-# ort = { version = "2.0.0-rc.10", features = ["copy-dylibs"] }
-# ndarray = "0.15"
+# AI/ML inference (optional)
+ort = { version = "2.0.0-rc.10", features = ["copy-dylibs"], optional = true }
+ndarray = { version = "0.15", optional = true }
 
 # Wayland layer shell
 smithay-client-toolkit = { version = "0.19", default-features = false }
@@ -34,3 +34,13 @@ thiserror = "1.0"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# System dependencies for SHM
+libc = "0.2"
+tempfile = "3.8"
+
+[features]
+default = []
+real-camera = ["dep:nokhwa"]
+ai-segmentation = ["dep:ort", "dep:ndarray"]
+full = ["real-camera", "ai-segmentation"]

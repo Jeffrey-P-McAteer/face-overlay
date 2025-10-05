@@ -82,6 +82,12 @@ pub struct Args {
         help = "Target frames per second"
     )]
     pub fps: u32,
+
+    #[arg(
+        long = "debug-wayland",
+        help = "Enable detailed Wayland protocol debugging"
+    )]
+    pub debug_wayland: bool,
 }
 
 #[derive(ValueEnum, Clone, Debug)]

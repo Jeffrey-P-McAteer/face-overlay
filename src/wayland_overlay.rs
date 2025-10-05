@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use image::{ImageBuffer, Rgba};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
+    delegate_compositor, delegate_layer, delegate_output, delegate_registry,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -12,13 +12,12 @@ use smithay_client_toolkit::{
         },
         WaylandSurface,
     },
-    shm::{Shm, ShmHandler},
 };
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_buffer, wl_output, wl_surface},
+    protocol::{wl_buffer, wl_output, wl_shm, wl_surface},
     Connection, QueueHandle,
 };
 
@@ -41,10 +40,11 @@ pub struct WaylandOverlay {
     registry_state: RegistryState,
     output_state: OutputState,
     compositor_state: CompositorState,
-    shm: Shm,
+    shm: wayland_client::protocol::wl_shm::WlShm,
     layer_shell: LayerShell,
     
     layer_surface: Option<LayerSurface>,
+    pool: Option<wayland_client::protocol::wl_shm_pool::WlShmPool>,
     buffer: Option<wl_buffer::WlBuffer>,
     
     width: u32,
@@ -63,26 +63,42 @@ struct OutputInfo {
 
 impl WaylandOverlay {
     pub fn new(anchor_position: AnchorPosition) -> Result<(Self, Connection, wayland_client::EventQueue<Self>)> {
+        // Check environment variables
+        let wayland_display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "not set".to_string());
+        let xdg_session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".to_string());
+        
+        info!("Wayland environment: WAYLAND_DISPLAY={}, XDG_SESSION_TYPE={}", wayland_display, xdg_session_type);
+        
         let conn = Connection::connect_to_env()
-            .context("Failed to connect to Wayland compositor")?;
+            .context("Failed to connect to Wayland compositor. Make sure you're running in a Wayland session (Sway, GNOME on Wayland, etc.)")?;
 
         let (globals, event_queue) = registry_queue_init(&conn)
             .context("Failed to initialize Wayland registry")?;
 
         let qh = event_queue.handle();
 
+        // Debug: List available protocols
+        info!("Available Wayland protocols:");
+        let protocol_list = globals.contents().with_list(|list| {
+            list.iter().map(|g| (g.interface.clone(), g.version)).collect::<Vec<_>>()
+        });
+        for (interface, version) in protocol_list {
+            info!("  - {} v{}", interface, version);
+        }
+
         let registry_state = RegistryState::new(&globals);
         let output_state = OutputState::new(&globals, &qh);
         let compositor_state = CompositorState::bind(&globals, &qh)
-            .context("Compositor not available")?;
+            .context("Compositor not available - this usually means the Wayland compositor doesn't support the required protocols")?;
         
-        let shm = Shm::bind(&globals, &qh)
+        let shm = globals
+            .bind::<wayland_client::protocol::wl_shm::WlShm, _, _>(&qh, 1..=1, ())
             .context("Shared memory not available")?;
         
         let layer_shell = LayerShell::bind(&globals, &qh)
-            .context("Layer shell not available")?;
+            .context("Layer shell not available - this compositor doesn't support wlr-layer-shell protocol. Sway, wlroots-based compositors, and some others support this.")?;
 
-        info!("Connected to Wayland compositor with layer shell support");
+        info!("Successfully connected to Wayland compositor with layer shell support");
 
         let overlay = Self {
             registry_state,
@@ -91,6 +107,7 @@ impl WaylandOverlay {
             shm,
             layer_shell,
             layer_surface: None,
+            pool: None,
             buffer: None,
             width: 640,
             height: 480,
@@ -102,6 +119,8 @@ impl WaylandOverlay {
     }
 
     pub fn create_layer_surface(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
+        info!("Creating layer surface with size {}x{}, anchor: {:?}", self.width, self.height, self.anchor_position);
+        
         let surface = self.compositor_state.create_surface(qh);
         
         let layer_surface = self.layer_shell.create_layer_surface(
@@ -113,7 +132,7 @@ impl WaylandOverlay {
         );
 
         layer_surface.set_anchor(self.anchor_position.into());
-        layer_surface.set_exclusive_zone(-1);
+        layer_surface.set_exclusive_zone(-1);  // Don't reserve space
         layer_surface.set_margin(20, 20, 20, 20);
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer_surface.set_size(self.width, self.height);
@@ -123,12 +142,17 @@ impl WaylandOverlay {
         
         self.layer_surface = Some(layer_surface);
         
-        info!("Created layer surface with anchor: {:?}", self.anchor_position);
+        info!("Layer surface created successfully with anchor: {:?}", self.anchor_position);
+        info!("Surface should appear in {} corner with 20px margins", 
+              match self.anchor_position {
+                  AnchorPosition::LowerLeft => "lower-left",
+                  AnchorPosition::LowerRight => "lower-right",
+              });
         
         Ok(())
     }
 
-    pub fn update_frame(&mut self, image: &ImageBuffer<Rgba<u8>, Vec<u8>>, _qh: &QueueHandle<Self>) -> Result<()> {
+    pub fn update_frame(&mut self, image: &ImageBuffer<Rgba<u8>, Vec<u8>>, qh: &QueueHandle<Self>) -> Result<()> {
         let Some(layer_surface) = &self.layer_surface else {
             warn!("No layer surface available for frame update");
             return Ok(());
@@ -136,18 +160,159 @@ impl WaylandOverlay {
 
         let (img_width, img_height) = image.dimensions();
         
+        // Update surface size if image dimensions changed
         if img_width != self.width || img_height != self.height {
             self.width = img_width;
             self.height = img_height;
             layer_surface.set_size(self.width, self.height);
+            
+            // Size changed - would need to recreate SHM pool in full implementation
+            debug!("Layer surface size changed to {}x{}", self.width, self.height);
         }
 
-        // Simplified buffer creation - proper implementation would use actual SHM pools
-        warn!("Using placeholder buffer implementation");
+        // Create shared memory buffer for actual pixel display
+        let stride = self.width * 4; // 4 bytes per pixel (ARGB)
+        let buffer_size = stride * self.height;
         
-        debug!("Would update frame: {}x{}", self.width, self.height);
+        // Create a simple shared memory buffer using memfd
+        let shm_fd = self.create_shm_fd(buffer_size as usize)?;
+        
+        // Create Wayland SHM pool
+        use std::os::fd::BorrowedFd;
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(shm_fd) };
+        let pool = self.shm.create_pool(borrowed_fd, buffer_size as i32, qh, ());
+        
+        // Create buffer from pool
+        let buffer = pool.create_buffer(
+            0,                           // offset
+            self.width as i32,          // width
+            self.height as i32,         // height  
+            stride as i32,              // stride
+            wl_shm::Format::Argb8888,   // format
+            qh,
+            (),
+        );
+        
+        // Write pixel data to shared memory
+        self.write_pixels_to_shm(image, shm_fd, buffer_size as usize)?;
+        
+        // Attach buffer and commit
+        let surface = layer_surface.wl_surface();
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage(0, 0, self.width as i32, self.height as i32);
+        surface.commit();
+        
+        // Clean up old buffer
+        if let Some(old_buffer) = self.buffer.take() {
+            old_buffer.destroy();
+        }
+        if let Some(old_pool) = self.pool.take() {
+            old_pool.destroy();
+        }
+        
+        // Store new resources
+        self.buffer = Some(buffer);
+        self.pool = Some(pool);
+        
+        debug!("Frame updated: {}x{} with actual pixel data displayed", self.width, self.height);
+        
+        Ok(())
+    }
 
-        debug!("Updated frame: {}x{}", self.width, self.height);
+    fn create_shm_fd(&self, size: usize) -> Result<i32> {
+        use std::ffi::CString;
+        use std::os::unix::io::AsRawFd;
+        
+        // Create anonymous file descriptor using memfd_create
+        let name = CString::new("face-overlay-shm").unwrap();
+        let fd = unsafe {
+            libc::syscall(libc::SYS_memfd_create, name.as_ptr(), libc::MFD_CLOEXEC)
+        };
+        
+        if fd == -1 {
+            // Fallback to tmpfile if memfd_create fails
+            let file = tempfile::tempfile()
+                .context("Failed to create temporary file for SHM")?;
+            let fd = file.as_raw_fd();
+            
+            // Truncate to required size
+            unsafe {
+                if libc::ftruncate(fd, size as i64) == -1 {
+                    anyhow::bail!("Failed to resize SHM file");
+                }
+            }
+            
+            // Leak the file handle to keep it alive
+            std::mem::forget(file);
+            Ok(fd)
+        } else {
+            let fd = fd as i32;
+            
+            // Truncate to required size
+            unsafe {
+                if libc::ftruncate(fd, size as i64) == -1 {
+                    anyhow::bail!("Failed to resize SHM file");
+                }
+            }
+            
+            Ok(fd)
+        }
+    }
+    
+    fn write_pixels_to_shm(&self, image: &ImageBuffer<Rgba<u8>, Vec<u8>>, fd: i32, size: usize) -> Result<()> {
+        use std::ptr;
+        
+        // Memory map the file descriptor
+        let ptr = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        
+        if ptr == libc::MAP_FAILED {
+            anyhow::bail!("Failed to mmap SHM file");
+        }
+        
+        // Write pixel data
+        let (img_width, img_height) = image.dimensions();
+        let buffer = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, size) };
+        
+        for y in 0..img_height {
+            for x in 0..img_width {
+                let pixel = image.get_pixel(x, y);
+                let offset = ((y * img_width + x) * 4) as usize;
+                
+                if offset + 3 < size {
+                    // Convert RGBA to ARGB format (Wayland's preferred format)
+                    // With premultiplied alpha for correct blending
+                    let r = pixel[0] as u32;
+                    let g = pixel[1] as u32;
+                    let b = pixel[2] as u32;
+                    let a = pixel[3] as u32;
+                    
+                    // Premultiply RGB values by alpha
+                    let premul_r = if a > 0 { (r * a / 255) as u8 } else { 0 };
+                    let premul_g = if a > 0 { (g * a / 255) as u8 } else { 0 };
+                    let premul_b = if a > 0 { (b * a / 255) as u8 } else { 0 };
+                    
+                    // Write in ARGB format (little-endian: BGRA in memory)
+                    buffer[offset] = premul_b;     // Blue
+                    buffer[offset + 1] = premul_g; // Green
+                    buffer[offset + 2] = premul_r; // Red
+                    buffer[offset + 3] = a as u8;  // Alpha
+                }
+            }
+        }
+        
+        // Unmap memory
+        unsafe {
+            libc::munmap(ptr, size);
+        }
         
         Ok(())
     }
@@ -299,11 +464,6 @@ impl LayerShellHandler for WaylandOverlay {
     }
 }
 
-impl ShmHandler for WaylandOverlay {
-    fn shm_state(&mut self) -> &mut Shm {
-        &mut self.shm
-    }
-}
 
 impl ProvidesRegistryState for WaylandOverlay {
     fn registry(&mut self) -> &mut RegistryState {
@@ -313,8 +473,48 @@ impl ProvidesRegistryState for WaylandOverlay {
     registry_handlers![OutputState];
 }
 
+
+// Manual SHM protocol implementation
+impl wayland_client::Dispatch<wayland_client::protocol::wl_shm::WlShm, ()> for WaylandOverlay {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wayland_client::protocol::wl_shm::WlShm,
+        _event: <wayland_client::protocol::wl_shm::WlShm as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &wayland_client::Connection,
+        _qhandle: &wayland_client::QueueHandle<Self>,
+    ) {
+        // Handle SHM events (format announcements, etc.)
+    }
+}
+
+impl wayland_client::Dispatch<wayland_client::protocol::wl_shm_pool::WlShmPool, ()> for WaylandOverlay {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wayland_client::protocol::wl_shm_pool::WlShmPool,
+        _event: <wayland_client::protocol::wl_shm_pool::WlShmPool as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &wayland_client::Connection,
+        _qhandle: &wayland_client::QueueHandle<Self>,
+    ) {
+        // Handle SHM pool events
+    }
+}
+
+impl wayland_client::Dispatch<wayland_client::protocol::wl_buffer::WlBuffer, ()> for WaylandOverlay {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wayland_client::protocol::wl_buffer::WlBuffer,
+        _event: <wayland_client::protocol::wl_buffer::WlBuffer as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &wayland_client::Connection,
+        _qhandle: &wayland_client::QueueHandle<Self>,
+    ) {
+        // Handle buffer events (release, etc.)
+    }
+}
+
 delegate_compositor!(WaylandOverlay);
 delegate_output!(WaylandOverlay);
-delegate_shm!(WaylandOverlay);
 delegate_layer!(WaylandOverlay);
 delegate_registry!(WaylandOverlay);

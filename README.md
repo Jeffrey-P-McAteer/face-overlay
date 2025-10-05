@@ -179,6 +179,84 @@ This is a **production-ready implementation** with the following capabilities:
 3. **Basic mouse tracking**: Uses simplified position detection for demo
 4. **Wayland-only**: Designed specifically for wlr-layer-shell protocol
 
+## ✅ Fixed: Mock Segmented Image Display Issue
+
+**Previous Issue**: The mock segmented image was not displaying on screen even though the warning was printed.
+
+**Status**: ✅ **FIXED** - The application now properly displays visual content including mock segmented images.
+
+**What now works:**
+- **Real SHM (Shared Memory) buffers** for efficient pixel data transfer
+- **Premultiplied alpha blending** for correct transparency rendering
+- **ARGB8888 pixel format** with proper endianness handling
+- **Actual visual overlay** that you can see on screen
+- **Mock radial gradient transparency** that demonstrates the AI segmentation interface
+
+## Understanding Warning Messages
+
+### "AI segmentation not available, creating mock segmented image"
+
+If you see this warning in the logs:
+```
+WARN AI segmentation not available, creating mock segmented image
+```
+
+This occurs because the application is running in **demonstration mode**. The AI segmentation features are conditionally compiled and currently disabled by default to avoid build dependency issues.
+
+**What's happening:**
+- ✅ **Webcam capture**: Working (simulated animated feed for demo)
+- ✅ **Wayland overlay**: Working (transparent window with actual pixel display)
+- ✅ **Mouse interaction**: Working (cursor detection and flipping)
+- ✅ **Mock AI segmentation**: Working (radial gradient transparency effect displayed on screen)
+- ⚠️ **Real AI segmentation**: Requires enabling features (see below)
+
+**To enable real CPU-based AI segmentation:**
+
+1. **Install system dependencies** (if needed):
+   ```bash
+   # Ubuntu/Debian
+   sudo apt install build-essential pkg-config libssl-dev libclang-dev
+   
+   # Arch Linux  
+   sudo pacman -S base-devel openssl clang
+   ```
+
+2. **Build with AI features**:
+   ```bash
+   cargo build --features ai-segmentation
+   ./target/debug/face-overlay -vv
+   ```
+
+3. **Expected behavior**:
+   - Downloads U2-Net model (~176MB) to `~/.cache/face-overlay-data/`
+   - Performs real AI inference for foreground/background segmentation
+   - Shows "AI segmentation successful" instead of the warning
+   - **Displays actual AI-generated transparency masks on screen**
+
+**The AI Pipeline (when enabled):**
+1. **Input**: RGB webcam frame (640x480)
+2. **Preprocessing**: Resize to 320x320, ImageNet normalization  
+3. **Inference**: U2-Net ONNX model on CPU
+4. **Postprocessing**: Threshold-based mask generation
+5. **Output**: RGBA frame with AI-generated transparency
+
+## Build Variants
+
+```bash
+# Current mode - Demo with simulated everything
+cargo build
+./target/debug/face-overlay
+
+# Real webcam capture only
+cargo build --features real-camera  
+
+# Real AI segmentation only
+cargo build --features ai-segmentation
+
+# Complete implementation (requires both webcam + AI deps)
+cargo build --features full
+```
+
 ## Future Enhancements
 
 - [ ] Real webcam capture with `nokhwa` integration
@@ -187,6 +265,36 @@ This is a **production-ready implementation** with the following capabilities:
 - [ ] Configuration file support
 - [ ] Performance optimizations and memory management
 - [ ] Cross-platform support (X11 fallback)
+
+## Troubleshooting
+
+### Overlay Not Appearing in Sway?
+
+If you're running Sway but don't see the overlay window, see the detailed [**Sway Debugging Guide**](SWAY_DEBUGGING.md).
+
+**Quick checks:**
+```bash
+# Verify Wayland environment
+echo $XDG_SESSION_TYPE  # Should be "wayland"
+echo $WAYLAND_DISPLAY   # Should show display socket
+
+# Run with full debugging
+./target/release/face-overlay -vv --debug-wayland
+
+# Look for "zwlr_layer_shell_v1" in the protocol list
+```
+
+### Supported Compositors
+
+✅ **Known to work:**
+- **Sway** (wlroots-based)
+- **river** 
+- **Hyprland**
+- **dwl**
+
+❌ **Won't work:**
+- GNOME on Wayland (no wlr-layer-shell support)
+- KDE Plasma Wayland (different protocols)
 
 ## License
 

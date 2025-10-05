@@ -61,6 +61,13 @@ async fn run_application(args: Args) -> Result<()> {
 
     let mut webcam = WebcamCapture::new(Some(&args.device))
         .context("Failed to initialize webcam")?;
+    
+    // Report webcam status
+    if webcam.is_simulated() {
+        info!("Using simulated camera feed (no real webcam available)");
+    } else {
+        info!("Using real webcam: {}", args.device);
+    }
 
     let segmentation_model = if model_path.exists() {
         match SegmentationModel::new(&model_path) {
@@ -141,22 +148,28 @@ async fn process_frame(
 
     let processed_frame = if let Some(model) = segmentation_model {
         match model.segment_foreground(&frame) {
-            Ok(segmented) => segmented,
+            Ok(segmented) => {
+                debug!("AI segmentation successful");
+                segmented
+            },
             Err(e) => {
-                warn!("Segmentation failed: {}, using raw frame", e);
+                warn!("Segmentation failed: {}, using raw frame with transparency", e);
+                // Convert to RGBA with partial transparency to show it's not segmented
                 let (width, height) = frame.dimensions();
                 let mut rgba_frame = image::ImageBuffer::new(width, height);
                 for (x, y, pixel) in frame.enumerate_pixels() {
-                    rgba_frame.put_pixel(x, y, image::Rgba([pixel[0], pixel[1], pixel[2], 255]));
+                    rgba_frame.put_pixel(x, y, image::Rgba([pixel[0], pixel[1], pixel[2], 200])); // 78% opacity
                 }
                 rgba_frame
             }
         }
     } else {
+        debug!("No AI model available, using raw frame with transparency");
         let (width, height) = frame.dimensions();
         let mut rgba_frame = image::ImageBuffer::new(width, height);
         for (x, y, pixel) in frame.enumerate_pixels() {
-            rgba_frame.put_pixel(x, y, image::Rgba([pixel[0], pixel[1], pixel[2], 255]));
+            // Use semi-transparent overlay when no AI segmentation is available
+            rgba_frame.put_pixel(x, y, image::Rgba([pixel[0], pixel[1], pixel[2], 180])); // 70% opacity
         }
         rgba_frame
     };
@@ -172,7 +185,7 @@ async fn process_frame(
         info!("Flipped overlay to opposite side due to mouse overlap");
     }
 
-    overlay.update_frame(&processed_frame, qh)
+    overlay.update_frame(&processed_frame, &qh)
         .context("Failed to update overlay frame")?;
 
     Ok(())
