@@ -88,6 +88,27 @@ pub struct Args {
         help = "Enable detailed Wayland protocol debugging"
     )]
     pub debug_wayland: bool,
+
+    #[arg(
+        long = "ai-model",
+        default_value = "u2net",
+        help = "AI model type to use for segmentation"
+    )]
+    pub ai_model: String,
+
+    #[arg(
+        long = "ai-inference-interval",
+        default_value = "3",
+        help = "Run AI inference every N frames (higher = better performance, lower quality)"
+    )]
+    pub ai_inference_interval: u32,
+
+    #[arg(
+        long = "mask-cache-size",
+        default_value = "5",
+        help = "Number of masks to cache for temporal smoothing"
+    )]
+    pub mask_cache_size: usize,
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -110,6 +131,18 @@ impl From<AnchorPosition> for crate::wayland_overlay::AnchorPosition {
 impl Args {
     pub fn parse_args() -> Self {
         Self::parse()
+    }
+
+    pub fn get_ai_model_type(&self) -> crate::segmentation::ModelType {
+        match self.ai_model.as_str() {
+            "u2net" => crate::segmentation::ModelType::U2Net,
+            "yolov8n-seg" | "yolo" => crate::segmentation::ModelType::YoloV8nSeg,
+            "fastsam" => crate::segmentation::ModelType::FastSam,
+            _ => {
+                eprintln!("Warning: Unknown model type '{}', defaulting to U2-Net", self.ai_model);
+                crate::segmentation::ModelType::U2Net
+            }
+        }
     }
 
     pub fn get_model_path(&self) -> std::path::PathBuf {

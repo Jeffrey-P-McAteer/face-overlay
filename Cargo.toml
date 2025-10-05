@@ -7,6 +7,14 @@ edition = "2024"
 name = "face_overlay"
 path = "src/lib.rs"
 
+# [[bin]]
+# name = "performance_test"
+# path = "performance_test.rs"
+
+# [[bin]]
+# name = "simple_performance_test"
+# path = "simple_performance_test.rs"
+
 [dependencies]
 # Webcam capture
 nokhwa = { version = "0.10", features = ["input-v4l"] }

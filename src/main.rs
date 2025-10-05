@@ -7,7 +7,7 @@ mod mouse_tracker;
 use anyhow::{Context, Result};
 use cli::Args;
 use mouse_tracker::MouseEventHandler;
-use segmentation::{download_model_if_needed, read_hf_token_from_file, SegmentationModel};
+use segmentation::{download_model_if_needed, read_hf_token_from_file, SegmentationModel, ModelType};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
@@ -53,7 +53,7 @@ async fn run_application(args: Args) -> Result<()> {
     let model_path = if args.model_path.is_some() {
         args.get_model_path()
     } else {
-        download_model_if_needed(hf_token, args.disable_download).await.unwrap_or_else(|e| {
+        download_model_if_needed(hf_token, args.disable_download, Some(args.get_ai_model_type())).await.unwrap_or_else(|e| {
             debug!("Model setup failed: {}", e);
             std::path::PathBuf::new()
         })
@@ -70,19 +70,58 @@ async fn run_application(args: Args) -> Result<()> {
     }
 
     let mut segmentation_model = if model_path.exists() {
-        match SegmentationModel::new(&model_path) {
+        match SegmentationModel::new_with_options(&model_path, args.width, args.height, args.get_ai_model_type(), args.ai_inference_interval) {
             Ok(model) => {
                 info!("AI segmentation model loaded successfully");
                 Some(model)
             }
             Err(e) => {
                 debug!("Failed to load segmentation model: {}", e);
-                None
+                
+                // Try fallback to U2-Net if it exists
+                let u2net_path = std::env::var("HOME")
+                    .map(|home| std::path::PathBuf::from(format!("{}/.cache/face-overlay-data/u2net.onnx", home)))
+                    .unwrap_or_default();
+                
+                if u2net_path.exists() && args.get_ai_model_type() != ModelType::U2Net {
+                    info!("Falling back to U2-Net model");
+                    match SegmentationModel::new_with_options(&u2net_path, args.width, args.height, ModelType::U2Net, args.ai_inference_interval) {
+                        Ok(model) => {
+                            info!("U2-Net fallback model loaded successfully");
+                            Some(model)
+                        }
+                        Err(e) => {
+                            debug!("Failed to load U2-Net fallback model: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
             }
         }
     } else {
-        debug!("No AI segmentation model available, using raw video feed");
-        None
+        // Try fallback to U2-Net if it exists
+        let u2net_path = std::env::var("HOME")
+            .map(|home| std::path::PathBuf::from(format!("{}/.cache/face-overlay-data/u2net.onnx", home)))
+            .unwrap_or_default();
+        
+        if u2net_path.exists() {
+            info!("No {} model found, falling back to U2-Net model", args.ai_model);
+            match SegmentationModel::new_with_options(&u2net_path, args.width, args.height, ModelType::U2Net, args.ai_inference_interval) {
+                Ok(model) => {
+                    info!("U2-Net fallback model loaded successfully");
+                    Some(model)
+                }
+                Err(e) => {
+                    debug!("Failed to load U2-Net fallback model: {}", e);
+                    None
+                }
+            }
+        } else {
+            debug!("No AI segmentation model available, using raw video feed");
+            None
+        }
     };
 
     let anchor_position: AnchorPosition = args.anchor.into();
