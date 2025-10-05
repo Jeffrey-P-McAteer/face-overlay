@@ -133,7 +133,7 @@ impl WaylandOverlay {
 
         layer_surface.set_anchor(self.anchor_position.into());
         layer_surface.set_exclusive_zone(-1);  // Don't reserve space
-        layer_surface.set_margin(20, 20, 20, 20);
+        layer_surface.set_margin(0, 0, 0, 0);  // No margins - extend to screen edges
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer_surface.set_size(self.width, self.height);
 
@@ -143,7 +143,7 @@ impl WaylandOverlay {
         self.layer_surface = Some(layer_surface);
         
         info!("Layer surface created successfully with anchor: {:?}", self.anchor_position);
-        info!("Surface should appear in {} corner with 20px margins", 
+        info!("Surface will extend to screen edges in {} corner with no margins", 
               match self.anchor_position {
                   AnchorPosition::LowerLeft => "lower-left",
                   AnchorPosition::LowerRight => "lower-right",
@@ -334,8 +334,8 @@ impl WaylandOverlay {
     pub fn get_surface_bounds(&self) -> Option<(i32, i32, i32, i32)> {
         if self.layer_surface.is_some() {
             let (x, y) = match self.anchor_position {
-                AnchorPosition::LowerLeft => (20, self.get_screen_height() - self.height as i32 - 20),
-                AnchorPosition::LowerRight => (self.get_screen_width() - self.width as i32 - 20, self.get_screen_height() - self.height as i32 - 20),
+                AnchorPosition::LowerLeft => (0, self.get_screen_height() - self.height as i32),
+                AnchorPosition::LowerRight => (self.get_screen_width() - self.width as i32, self.get_screen_height() - self.height as i32),
             };
             Some((x, y, self.width as i32, self.height as i32))
         } else {
