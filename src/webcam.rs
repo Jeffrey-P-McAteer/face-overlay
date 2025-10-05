@@ -12,22 +12,26 @@ pub struct WebcamCapture {
     camera: Option<Camera>,
     width: u32,
     height: u32,
+    target_width: u32,
+    target_height: u32,
     frame_count: u32,
     simulated: bool,
 }
 
 impl WebcamCapture {
-    pub fn new(device_path: Option<&str>) -> Result<Self> {
+    pub fn new(device_path: Option<&str>, target_width: u32, target_height: u32) -> Result<Self> {
         let device = device_path.unwrap_or("/dev/video0");
         
         // Try to create real camera first
         match Self::try_create_camera(device) {
             Ok((camera, width, height)) => {
-                info!("Successfully opened webcam device: {} ({}x{})", device, width, height);
+                info!("Successfully opened webcam device: {} ({}x{}) -> scaling to {}x{}", device, width, height, target_width, target_height);
                 Ok(Self {
                     camera: Some(camera),
                     width,
                     height,
+                    target_width,
+                    target_height,
                     frame_count: 0,
                     simulated: false,
                 })
@@ -37,8 +41,10 @@ impl WebcamCapture {
                 debug!("Camera initialization failed due to: {:?}", e);
                 Ok(Self {
                     camera: None,
-                    width: 640,
-                    height: 480,
+                    width: target_width,
+                    height: target_height,
+                    target_width,
+                    target_height,
                     frame_count: 0,
                     simulated: true,
                 })
@@ -72,25 +78,39 @@ impl WebcamCapture {
     pub fn capture_frame(&mut self) -> Result<ImageBuffer<Rgb<u8>, Vec<u8>>> {
         self.frame_count += 1;
         
-        if let Some(camera) = self.camera.as_mut() {
+        let raw_frame = if let Some(camera) = self.camera.as_mut() {
             // Real camera capture
             match Self::capture_real_frame_static(camera, self.width, self.height) {
                 Ok(frame) => {
                     debug!("Captured real frame {}: {}x{}", self.frame_count, self.width, self.height);
-                    return Ok(frame);
+                    frame
                 }
                 Err(e) => {
                     warn!("Failed to capture real frame: {}, falling back to simulation", e);
                     debug!("Camera capture error: {:?}", e);
                     self.simulated = true;
+                    self.generate_simulated_frame()
                 }
             }
+        } else {
+            // Simulated camera capture (fallback)
+            debug!("Generated simulated frame {}: {}x{}", self.frame_count, self.width, self.height);
+            self.generate_simulated_frame()
+        };
+
+        // Scale frame to target dimensions if needed
+        if (self.width, self.height) != (self.target_width, self.target_height) {
+            let scaled_frame = image::imageops::resize(
+                &raw_frame,
+                self.target_width,
+                self.target_height,
+                image::imageops::FilterType::Lanczos3,
+            );
+            debug!("Scaled frame from {}x{} to {}x{}", self.width, self.height, self.target_width, self.target_height);
+            Ok(scaled_frame)
+        } else {
+            Ok(raw_frame)
         }
-        
-        // Simulated camera capture (fallback)
-        let buffer = self.generate_simulated_frame();
-        debug!("Generated simulated frame {}: {}x{}", self.frame_count, self.width, self.height);
-        Ok(buffer)
     }
 
     fn capture_real_frame_static(camera: &mut Camera, width: u32, height: u32) -> Result<ImageBuffer<Rgb<u8>, Vec<u8>>> {
@@ -107,16 +127,23 @@ impl WebcamCapture {
     }
 
     fn generate_simulated_frame(&self) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
-        let mut buffer = RgbImage::new(self.width, self.height);
+        // Use native resolution if camera exists, otherwise use target resolution
+        let (frame_width, frame_height) = if self.camera.is_some() {
+            (self.width, self.height)
+        } else {
+            (self.target_width, self.target_height)
+        };
+        
+        let mut buffer = RgbImage::new(frame_width, frame_height);
         
         let time_factor = (self.frame_count as f32 * 0.1).sin();
         let base_color = ((time_factor * 127.0 + 128.0) as u8).clamp(50, 200);
         
         for (x, y, pixel) in buffer.enumerate_pixels_mut() {
             let distance_from_center = (
-                ((x as f32 - self.width as f32 / 2.0).powi(2) + 
-                 (y as f32 - self.height as f32 / 2.0).powi(2))
-            ).sqrt() / (self.width as f32 / 2.0);
+                ((x as f32 - frame_width as f32 / 2.0).powi(2) + 
+                 (y as f32 - frame_height as f32 / 2.0).powi(2))
+            ).sqrt() / (frame_width as f32 / 2.0);
             
             let fade = (1.0 - distance_from_center.clamp(0.0, 1.0)) * 255.0;
             
@@ -131,7 +158,7 @@ impl WebcamCapture {
     }
 
     pub fn resolution(&self) -> (u32, u32) {
-        (self.width, self.height)
+        (self.target_width, self.target_height)
     }
 
     pub fn stop(&mut self) -> Result<()> {

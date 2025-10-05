@@ -59,7 +59,7 @@ async fn run_application(args: Args) -> Result<()> {
         })
     };
 
-    let mut webcam = WebcamCapture::new(Some(&args.device))
+    let mut webcam = WebcamCapture::new(Some(&args.device), args.width, args.height)
         .context("Failed to initialize webcam")?;
     
     // Report webcam status
@@ -86,7 +86,8 @@ async fn run_application(args: Args) -> Result<()> {
     };
 
     let anchor_position: AnchorPosition = args.anchor.into();
-    let (mut overlay, _conn, mut event_queue) = WaylandOverlay::new(anchor_position)
+    let (overlay_width, overlay_height) = webcam.resolution();
+    let (mut overlay, _conn, mut event_queue) = WaylandOverlay::new(anchor_position, overlay_width, overlay_height)
         .context("Failed to initialize Wayland overlay")?;
 
     let qh = event_queue.handle();

@@ -62,7 +62,7 @@ struct OutputInfo {
 }
 
 impl WaylandOverlay {
-    pub fn new(anchor_position: AnchorPosition) -> Result<(Self, Connection, wayland_client::EventQueue<Self>)> {
+    pub fn new(anchor_position: AnchorPosition, width: u32, height: u32) -> Result<(Self, Connection, wayland_client::EventQueue<Self>)> {
         // Check environment variables
         let wayland_display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "not set".to_string());
         let xdg_session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "unknown".to_string());
@@ -109,8 +109,8 @@ impl WaylandOverlay {
             layer_surface: None,
             pool: None,
             buffer: None,
-            width: 640,
-            height: 480,
+            width,
+            height,
             anchor_position,
             outputs: HashMap::new(),
         };
