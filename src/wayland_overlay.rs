@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use tracing::{debug, info, warn};
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_buffer, wl_compositor, wl_output, wl_region, wl_shm, wl_surface},
+    protocol::{wl_buffer, wl_output, wl_shm, wl_surface},
     Connection, QueueHandle,
 };
 
@@ -59,7 +59,6 @@ pub struct WaylandOverlay {
 
 #[derive(Debug, Clone)]
 struct OutputInfo {
-    name: String,
     width: i32,
     height: i32,
 }
@@ -432,7 +431,6 @@ impl OutputHandler for WaylandOverlay {
         output: wl_output::WlOutput,
     ) {
         let info = OutputInfo {
-            name: "Unknown".to_string(),
             width: 1920,
             height: 1080,
         };
@@ -447,7 +445,6 @@ impl OutputHandler for WaylandOverlay {
     ) {
         if let Some(output_info) = self.output_state.info(&output) {
             let info = OutputInfo {
-                name: output_info.name.clone().unwrap_or_else(|| "Unknown".to_string()),
                 width: output_info.logical_size.map(|s| s.0).unwrap_or(1920),
                 height: output_info.logical_size.map(|s| s.1).unwrap_or(1080),
             };

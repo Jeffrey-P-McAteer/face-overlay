@@ -83,11 +83,6 @@ pub struct Args {
     )]
     pub fps: u32,
 
-    #[arg(
-        long = "debug-wayland",
-        help = "Enable detailed Wayland protocol debugging"
-    )]
-    pub debug_wayland: bool,
 
     #[arg(
         long = "ai-model",
@@ -99,17 +94,6 @@ pub struct Args {
     // Removed ai_inference_interval - AI now runs on EVERY frame for maximum responsiveness
     // Removed mask_cache_size - no more inefficient caching system
 
-    #[arg(
-        long = "force-cpu",
-        help = "Force CPU execution, disable GPU acceleration"
-    )]
-    pub force_cpu: bool,
-
-    #[arg(
-        long = "gpu-provider",
-        help = "Preferred GPU provider (cuda, tensorrt, rocm, cpu)"
-    )]
-    pub gpu_provider: Option<String>,
 }
 
 #[derive(ValueEnum, Clone, Debug)]

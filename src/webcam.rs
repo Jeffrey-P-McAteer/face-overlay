@@ -172,9 +172,6 @@ impl WebcamCapture {
         Ok(())
     }
 
-    pub fn is_simulated(&self) -> bool {
-        self.simulated || self.camera.is_none()
-    }
 }
 
 impl Drop for WebcamCapture {

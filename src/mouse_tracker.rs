@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::time::{Duration, Instant};
-use tracing::{debug, warn};
+use tracing::debug;
 
 pub struct MouseTracker {
     last_overlap_time: Option<Instant>,
@@ -53,65 +53,22 @@ impl MouseTracker {
         false
     }
 
-    pub fn is_overlapping(&self) -> bool {
-        self.is_overlapping
-    }
 
     pub fn reset_flip_state(&mut self) {
         self.should_flip = false;
     }
 }
 
-#[cfg(target_os = "linux")]
-pub struct WaylandMousePosition;
-
-#[cfg(target_os = "linux")]
-impl WaylandMousePosition {
-    pub fn new() -> Result<Self> {
-        Ok(Self)
-    }
-
-    pub fn get_position(&mut self) -> Result<(i32, i32)> {
-        // Position is now tracked directly in WaylandOverlay via seat protocol
-        // This will be fetched through the overlay reference in MouseEventHandler
-        Ok((0, 0)) // Placeholder - actual position comes from overlay
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub struct WaylandMousePosition;
-
-#[cfg(not(target_os = "linux"))]
-impl WaylandMousePosition {
-    pub fn new() -> Result<Self> {
-        anyhow::bail!("Mouse position tracking is only supported on Linux");
-    }
-
-    pub fn get_position(&mut self) -> Result<(i32, i32)> {
-        anyhow::bail!("Mouse position tracking is only supported on Linux");
-    }
-}
 
 pub struct MouseEventHandler {
     tracker: MouseTracker,
-    position_reader: WaylandMousePosition,
     enabled: bool,
 }
 
 impl MouseEventHandler {
     pub fn new(flip_delay_ms: u64, enabled: bool) -> Result<Self> {
-        let position_reader = if enabled {
-            WaylandMousePosition::new()?
-        } else {
-            WaylandMousePosition::new().unwrap_or_else(|_| {
-                warn!("Mouse position tracking not available, disabling mouse flip functionality");
-                WaylandMousePosition::new().unwrap_or_else(|_| panic!("Failed to create mouse position reader"))
-            })
-        };
-
         Ok(Self {
             tracker: MouseTracker::new(flip_delay_ms),
-            position_reader,
             enabled,
         })
     }
@@ -133,7 +90,4 @@ impl MouseEventHandler {
         self.tracker.reset_flip_state();
     }
 
-    pub fn is_overlapping(&self) -> bool {
-        self.tracker.is_overlapping()
-    }
 }
