@@ -66,7 +66,20 @@ pub fn detect_ai_accelerators() -> Result<Vec<String>> {
 fn test_cuda_availability() -> bool {
     #[cfg(feature = "cuda")]
     {
-        true  // If CUDA feature is enabled, assume it's available
+        // Actually test if CUDA is available by trying to create a session
+        match Session::builder()
+            .and_then(|builder| builder.with_execution_providers([CUDAExecutionProvider::default().build()]))
+            .and_then(|builder| builder.commit_from_memory(&[0u8; 32])) // Minimal test data
+        {
+            Ok(_) => {
+                tracing::debug!("CUDA runtime test: Available");
+                true
+            }
+            Err(e) => {
+                tracing::debug!("CUDA runtime test failed: {}", e);
+                false
+            }
+        }
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -77,7 +90,20 @@ fn test_cuda_availability() -> bool {
 fn test_tensorrt_availability() -> bool {
     #[cfg(feature = "tensorrt")]
     {
-        true  // If TensorRT feature is enabled, assume it's available
+        // Actually test if TensorRT is available by trying to create a session
+        match Session::builder()
+            .and_then(|builder| builder.with_execution_providers([TensorRTExecutionProvider::default().build()]))
+            .and_then(|builder| builder.commit_from_memory(&[0u8; 32])) // Minimal test data
+        {
+            Ok(_) => {
+                tracing::debug!("TensorRT runtime test: Available");
+                true
+            }
+            Err(e) => {
+                tracing::debug!("TensorRT runtime test failed: {}", e);
+                false
+            }
+        }
     }
     #[cfg(not(feature = "tensorrt"))]
     {
@@ -88,7 +114,20 @@ fn test_tensorrt_availability() -> bool {
 fn test_rocm_availability() -> bool {
     #[cfg(feature = "rocm")]
     {
-        true  // If ROCm feature is enabled, assume it's available
+        // Actually test if ROCm is available by trying to create a session
+        match Session::builder()
+            .and_then(|builder| builder.with_execution_providers([ROCmExecutionProvider::default().build()]))
+            .and_then(|builder| builder.commit_from_memory(&[0u8; 32])) // Minimal test data
+        {
+            Ok(_) => {
+                tracing::debug!("ROCm runtime test: Available");
+                true
+            }
+            Err(e) => {
+                tracing::debug!("ROCm runtime test failed: {}", e);
+                false
+            }
+        }
     }
     #[cfg(not(feature = "rocm"))]
     {
@@ -101,6 +140,8 @@ pub enum ModelType {
     U2Net,
     YoloV8nSeg,
     FastSam,
+    MediaPipeSelfie,
+    SINet,
 }
 
 impl ModelType {
@@ -109,6 +150,8 @@ impl ModelType {
             ModelType::U2Net => "u2net.onnx",
             ModelType::YoloV8nSeg => "yolov8n-seg.onnx", 
             ModelType::FastSam => "fastsam.onnx",
+            ModelType::MediaPipeSelfie => "mediapipe_selfie_segmentation.onnx",
+            ModelType::SINet => "sinet.onnx",
         }
     }
     
@@ -117,6 +160,8 @@ impl ModelType {
             ModelType::U2Net => (320, 320),
             ModelType::YoloV8nSeg => (640, 640),
             ModelType::FastSam => (512, 512),
+            ModelType::MediaPipeSelfie => (256, 256),  // Optimized for 256x256 input
+            ModelType::SINet => (224, 224),  // Optimized for mobile/CPU
         }
     }
     
@@ -125,6 +170,8 @@ impl ModelType {
             ModelType::U2Net => true,
             ModelType::YoloV8nSeg => true,
             ModelType::FastSam => true,
+            ModelType::MediaPipeSelfie => true,  // Normalized input required
+            ModelType::SINet => true,  // Normalized input required
         }
     }
 }
@@ -199,7 +246,7 @@ pub struct SegmentationModel {
 
 impl SegmentationModel {
     pub fn new(model_path: &Path, target_width: u32, target_height: u32) -> Result<Self> {
-        Self::new_with_options(model_path, target_width, target_height, ModelType::YoloV8nSeg, 3, false, None)
+        Self::new_with_options(model_path, target_width, target_height, ModelType::MediaPipeSelfie, 3, false, None)
     }
     
     pub fn new_with_options(model_path: &Path, target_width: u32, target_height: u32, model_type: ModelType, ai_inference_interval: u32, force_cpu: bool, preferred_provider: Option<&str>) -> Result<Self> {
@@ -387,18 +434,24 @@ impl SegmentationModel {
         // Auto-detect GPU providers in order of preference for Nvidia GPUs
         
         // 1. Try TensorRT first (NVIDIA GPUs with TensorRT) - fastest for inference with lowest latency
-        if let Ok(session) = Self::try_tensorrt_session(model_path) {
-            return Ok(session);
+        if test_tensorrt_availability() {
+            if let Ok(session) = Self::try_tensorrt_session(model_path) {
+                return Ok(session);
+            }
         }
         
-        // 2. Try CUDA (NVIDIA GPUs) - most common, good performance
-        if let Ok(session) = Self::try_cuda_session(model_path) {
-            return Ok(session);
+        // 2. Try CUDA (NVIDIA GPUs) - most common, good performance  
+        if test_cuda_availability() {
+            if let Ok(session) = Self::try_cuda_session(model_path) {
+                return Ok(session);
+            }
         }
         
         // 3. Try ROCm (AMD GPUs)
-        if let Ok(session) = Self::try_rocm_session(model_path) {
-            return Ok(session);
+        if test_rocm_availability() {
+            if let Ok(session) = Self::try_rocm_session(model_path) {
+                return Ok(session);
+            }
         }
         
         // 4. Fall back to CPU with optimizations
@@ -508,6 +561,38 @@ impl SegmentationModel {
                     }
                 }
             }
+            ModelType::MediaPipeSelfie => {
+                // MediaPipe Selfie uses 0-1 normalization (RGB input, not BGR)
+                for c in 0..3 {
+                    for y in 0..self.input_height {
+                        for x in 0..self.input_width {
+                            let pixel = image.get_pixel(x as u32, y as u32);
+                            let value = pixel[c] as f32 / 255.0;
+                            input_data.push(value);
+                        }
+                    }
+                }
+            }
+            ModelType::SINet => {
+                // SINet uses ImageNet normalization but may have specific requirements
+                for c in 0..3 {
+                    for y in 0..self.input_height {
+                        for x in 0..self.input_width {
+                            let pixel = image.get_pixel(x as u32, y as u32);
+                            let value = pixel[c] as f32 / 255.0;
+                            
+                            let normalized = match c {
+                                0 => (value - 0.485) / 0.229, // Red channel
+                                1 => (value - 0.456) / 0.224, // Green channel  
+                                2 => (value - 0.406) / 0.225, // Blue channel
+                                _ => unreachable!(),
+                            };
+                            
+                            input_data.push(normalized);
+                        }
+                    }
+                }
+            }
             _ => {
                 // Default normalization (ImageNet)
                 for c in 0..3 {
@@ -546,6 +631,20 @@ impl SegmentationModel {
                 }
                 // Fallback: use first output
                 let first_tensor = outputs.values().next().unwrap();
+                let (_, mask_slice) = first_tensor.try_extract_tensor::<f32>()?;
+                Ok(mask_slice.to_vec())
+            }
+            ModelType::MediaPipeSelfie => {
+                // MediaPipe Selfie outputs a single mask tensor (256x256x1)
+                let first_tensor = outputs.values().next()
+                    .context("No output tensor found for MediaPipe Selfie")?;
+                let (_, mask_slice) = first_tensor.try_extract_tensor::<f32>()?;
+                Ok(mask_slice.to_vec())
+            }
+            ModelType::SINet => {
+                // SINet outputs a single mask tensor 
+                let first_tensor = outputs.values().next()
+                    .context("No output tensor found for SINet")?;
                 let (_, mask_slice) = first_tensor.try_extract_tensor::<f32>()?;
                 Ok(mask_slice.to_vec())
             }
@@ -731,6 +830,18 @@ fn get_model_download_urls(model_type: ModelType) -> Vec<(&'static str, &'static
             // FastSAM models
             ("Ultralytics GitHub", "https://github.com/ultralytics/assets/releases/download/v8.3.0/FastSAM-s.pt"),
             ("Hugging Face (Ultralytics)", "https://huggingface.co/Ultralytics/FastSAM/resolve/main/FastSAM-s.pt"),
+        ],
+        ModelType::MediaPipeSelfie => vec![
+            // MediaPipe Selfie Segmentation models
+            ("Hugging Face (onnx-community)", "https://huggingface.co/onnx-community/mediapipe_selfie_segmentation/resolve/main/general.onnx"),
+            ("Hugging Face (qualcomm)", "https://huggingface.co/qualcomm/MediaPipe-Selfie-Segmentation/resolve/main/MediaPipe-Selfie-Segmentation.onnx"),
+            ("Backup (onnx-models)", "https://github.com/onnx/models/raw/main/vision/body_analysis/selfie_segmentation/model/selfie_multiclass_256x256.onnx"),
+        ],
+        ModelType::SINet => vec![
+            // SINet Portrait Segmentation models
+            ("GitHub (anilsathyan7)", "https://github.com/anilsathyan7/Portrait-Segmentation/releases/download/v1.0/SINet.onnx"),
+            ("Portrait-Segmentation", "https://raw.githubusercontent.com/anilsathyan7/Portrait-Segmentation/main/models/SINet.onnx"),
+            ("Fast-Portrait-Segmentation", "https://github.com/YexingWan/Fast-Portrait-Segmentation/raw/main/model/SINet.onnx"),
         ],
     }
 }

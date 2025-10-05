@@ -91,8 +91,8 @@ pub struct Args {
 
     #[arg(
         long = "ai-model",
-        default_value = "u2net",
-        help = "AI model type to use for segmentation"
+        default_value = "mediapipe-selfie",
+        help = "AI model type to use for segmentation (mediapipe-selfie, sinet, u2net, yolov8n-seg, fastsam)"
     )]
     pub ai_model: String,
 
@@ -147,12 +147,14 @@ impl Args {
 
     pub fn get_ai_model_type(&self) -> crate::segmentation::ModelType {
         match self.ai_model.as_str() {
+            "mediapipe-selfie" | "mediapipe" | "selfie" => crate::segmentation::ModelType::MediaPipeSelfie,
+            "sinet" => crate::segmentation::ModelType::SINet,
             "u2net" => crate::segmentation::ModelType::U2Net,
             "yolov8n-seg" | "yolo" => crate::segmentation::ModelType::YoloV8nSeg,
             "fastsam" => crate::segmentation::ModelType::FastSam,
             _ => {
-                eprintln!("Warning: Unknown model type '{}', defaulting to U2-Net", self.ai_model);
-                crate::segmentation::ModelType::U2Net
+                eprintln!("Warning: Unknown model type '{}', defaulting to MediaPipe Selfie", self.ai_model);
+                crate::segmentation::ModelType::MediaPipeSelfie
             }
         }
     }
