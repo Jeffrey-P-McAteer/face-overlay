@@ -27,6 +27,8 @@ impl MouseTracker {
             && mouse_y >= overlay_y
             && mouse_y < overlay_y + overlay_height;
 
+        tracing::info!("update_mouse_position {},{} {:?} currently_overlapping = {:?} last_overlap_time = {:?}", mouse_x, mouse_y, overlay_bounds, currently_overlapping, self.last_overlap_time );
+
         if currently_overlapping && !self.is_overlapping {
             self.last_overlap_time = Some(Instant::now());
             self.is_overlapping = true;
