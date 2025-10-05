@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use cli::Args;
 use image::ImageBuffer;
 use mouse_tracker::MouseEventHandler;
-use segmentation::{download_model_if_needed, read_hf_token_from_file, SegmentationModel, ModelType, detect_ai_accelerators};
+use segmentation::{download_model_if_needed, read_hf_token_from_file, SegmentationModel, ModelType};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
@@ -35,17 +35,8 @@ async fn main() -> Result<()> {
 async fn run_application(args: Args) -> Result<()> {
     info!("Initializing face overlay application...");
     
-    // Detect and display available AI accelerators
-    match detect_ai_accelerators() {
-        Ok(accelerators) => {
-            if accelerators.len() > 1 {
-                info!("🚀 AI acceleration ready - Nvidia GPU will be prioritized for inference");
-            }
-        }
-        Err(e) => {
-            warn!("Failed to detect AI accelerators: {}", e);
-        }
-    }
+    // CPU-optimized segmentation
+    info!("🖥️ Using CPU-optimized AI segmentation");
     
     // Read Hugging Face token if provided
     let hf_token = if let Some(token_file) = &args.hf_token_file {
@@ -83,9 +74,9 @@ async fn run_application(args: Args) -> Result<()> {
     }
 
     let mut segmentation_model = if model_path.exists() {
-        match SegmentationModel::new_with_options(&model_path, args.width, args.height, args.get_ai_model_type(), args.force_cpu, args.gpu_provider.as_deref()) {
+        match SegmentationModel::new(&model_path, args.get_ai_model_type()) {
             Ok(model) => {
-                info!("AI segmentation model loaded successfully");
+                info!("CPU-optimized AI segmentation model loaded successfully");
                 Some(model)
             }
             Err(e) => {
@@ -98,7 +89,7 @@ async fn run_application(args: Args) -> Result<()> {
                 
                 if u2net_path.exists() && args.get_ai_model_type() != ModelType::U2Net {
                     info!("Falling back to U2-Net model");
-                    match SegmentationModel::new_with_options(&u2net_path, args.width, args.height, ModelType::U2Net, args.force_cpu, args.gpu_provider.as_deref()) {
+                    match SegmentationModel::new(&u2net_path, ModelType::U2Net) {
                         Ok(model) => {
                             info!("U2-Net fallback model loaded successfully");
                             Some(model)
@@ -121,7 +112,7 @@ async fn run_application(args: Args) -> Result<()> {
         
         if u2net_path.exists() {
             info!("No {} model found, falling back to U2-Net model", args.ai_model);
-            match SegmentationModel::new_with_options(&u2net_path, args.width, args.height, ModelType::U2Net, args.force_cpu, args.gpu_provider.as_deref()) {
+            match SegmentationModel::new(&u2net_path, ModelType::U2Net) {
                 Ok(model) => {
                     info!("U2-Net fallback model loaded successfully");
                     Some(model)
@@ -219,7 +210,7 @@ async fn process_frame(
             }
         }
     } else {
-        error!("🚨 No AI model available - this should not happen with efficient design!");
+        debug!("No AI model available, using raw video feed");
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         
         // Efficient fallback: full opacity

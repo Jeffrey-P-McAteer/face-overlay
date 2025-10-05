@@ -10,130 +10,6 @@ use ort::{
     value::Value,
 };
 
-#[cfg(feature = "cuda")]
-use ort::execution_providers::CUDAExecutionProvider;
-
-#[cfg(feature = "tensorrt")]
-use ort::execution_providers::TensorRTExecutionProvider;
-
-#[cfg(feature = "rocm")]
-use ort::execution_providers::ROCmExecutionProvider;
-
-pub fn detect_ai_accelerators() -> Result<Vec<String>> {
-    let mut available_accelerators = Vec::new();
-    
-    tracing::info!("🔍 Detecting AI accelerator hardware...");
-    
-    // Test CUDA (NVIDIA GPUs)
-    if test_cuda_availability() {
-        available_accelerators.push("CUDA (NVIDIA GPU)".to_string());
-        tracing::info!("✅ CUDA (NVIDIA GPU) - Available");
-    } else {
-        tracing::info!("❌ CUDA (NVIDIA GPU) - Not available");
-    }
-    
-    // Test TensorRT (NVIDIA GPUs with TensorRT)
-    if test_tensorrt_availability() {
-        available_accelerators.push("TensorRT (NVIDIA GPU)".to_string());
-        tracing::info!("✅ TensorRT (NVIDIA GPU) - Available");
-    } else {
-        tracing::info!("❌ TensorRT (NVIDIA GPU) - Not available");
-    }
-    
-    // Test ROCm (AMD GPUs)
-    if test_rocm_availability() {
-        available_accelerators.push("ROCm (AMD GPU)".to_string());
-        tracing::info!("✅ ROCm (AMD GPU) - Available");
-    } else {
-        tracing::info!("❌ ROCm (AMD GPU) - Not available");
-    }
-    
-    // CPU is always available
-    available_accelerators.push("CPU".to_string());
-    tracing::info!("✅ CPU - Available");
-    
-    if available_accelerators.len() == 1 {
-        tracing::warn!("⚠️  No GPU acceleration available - using CPU only");
-    } else {
-        tracing::info!("🚀 Found {} AI accelerator(s): {}", 
-                      available_accelerators.len(), 
-                      available_accelerators.join(", "));
-    }
-    
-    Ok(available_accelerators)
-}
-
-fn test_cuda_availability() -> bool {
-    #[cfg(feature = "cuda")]
-    {
-        // Actually test if CUDA is available by trying to create a session
-        match Session::builder()
-            .and_then(|builder| builder.with_execution_providers([CUDAExecutionProvider::default().build()]))
-            .and_then(|builder| builder.commit_from_memory(&[0u8; 32])) // Minimal test data
-        {
-            Ok(_) => {
-                tracing::debug!("CUDA runtime test: Available");
-                true
-            }
-            Err(e) => {
-                tracing::debug!("CUDA runtime test failed: {}", e);
-                false
-            }
-        }
-    }
-    #[cfg(not(feature = "cuda"))]
-    {
-        false
-    }
-}
-
-fn test_tensorrt_availability() -> bool {
-    #[cfg(feature = "tensorrt")]
-    {
-        // Actually test if TensorRT is available by trying to create a session
-        match Session::builder()
-            .and_then(|builder| builder.with_execution_providers([TensorRTExecutionProvider::default().build()]))
-            .and_then(|builder| builder.commit_from_memory(&[0u8; 32])) // Minimal test data
-        {
-            Ok(_) => {
-                tracing::debug!("TensorRT runtime test: Available");
-                true
-            }
-            Err(e) => {
-                tracing::debug!("TensorRT runtime test failed: {}", e);
-                false
-            }
-        }
-    }
-    #[cfg(not(feature = "tensorrt"))]
-    {
-        false
-    }
-}
-
-fn test_rocm_availability() -> bool {
-    #[cfg(feature = "rocm")]
-    {
-        // Actually test if ROCm is available by trying to create a session
-        match Session::builder()
-            .and_then(|builder| builder.with_execution_providers([ROCmExecutionProvider::default().build()]))
-            .and_then(|builder| builder.commit_from_memory(&[0u8; 32])) // Minimal test data
-        {
-            Ok(_) => {
-                tracing::debug!("ROCm runtime test: Available");
-                true
-            }
-            Err(e) => {
-                tracing::debug!("ROCm runtime test failed: {}", e);
-                false
-            }
-        }
-    }
-    #[cfg(not(feature = "rocm"))]
-    {
-        false
-    }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ModelType {
@@ -165,15 +41,6 @@ impl ModelType {
         }
     }
     
-    pub fn requires_preprocessing(&self) -> bool {
-        match self {
-            ModelType::U2Net => true,
-            ModelType::YoloV8nSeg => true,
-            ModelType::FastSam => true,
-            ModelType::MediaPipeSelfie => true,  // Normalized input required
-            ModelType::SINet => true,  // Normalized input required
-        }
-    }
 }
 
 // Removed inefficient MaskCache system - AI runs on every frame for maximum responsiveness
@@ -188,19 +55,15 @@ pub struct SegmentationModel {
 }
 
 impl SegmentationModel {
-    pub fn new(model_path: &Path, target_width: u32, target_height: u32) -> Result<Self> {
-        Self::new_with_options(model_path, target_width, target_height, ModelType::MediaPipeSelfie, false, None)
-    }
-    
-    pub fn new_with_options(model_path: &Path, _target_width: u32, _target_height: u32, model_type: ModelType, force_cpu: bool, preferred_provider: Option<&str>) -> Result<Self> {
-        tracing::info!("Loading AI segmentation model from: {:?} (type: {:?})", model_path, model_type);
+    pub fn new(model_path: &Path, model_type: ModelType) -> Result<Self> {
+        tracing::info!("Loading CPU-optimized AI segmentation model from: {:?} (type: {:?})", model_path, model_type);
         
         if !model_path.exists() {
             anyhow::bail!("Model file does not exist at path: {:?}", model_path);
         }
         
-        // Try GPU acceleration first, fall back to CPU
-        let session = Self::create_optimized_session(model_path, force_cpu, preferred_provider)?;
+        // Create CPU-only session
+        let session = Self::create_cpu_session(model_path)?;
         
         // Debug: Print model input/output info
         tracing::debug!("Model inputs: {:?}", session.inputs.iter().map(|i| &i.name).collect::<Vec<_>>());
@@ -209,7 +72,7 @@ impl SegmentationModel {
         // Get input dimensions based on model type
         let (input_width, input_height) = model_type.input_size();
 
-        tracing::info!("🚀 AI model loaded successfully. Input size: {}x{}, running AI on EVERY frame for maximum responsiveness", 
+        tracing::info!("🖥️ CPU-optimized AI model loaded successfully. Input size: {}x{}", 
                       input_width, input_height);
 
         // Pre-allocate buffer for maximum efficiency
@@ -308,144 +171,10 @@ impl SegmentationModel {
         Ok(result)
     }
     
-    fn create_optimized_session(model_path: &Path, force_cpu: bool, preferred_provider: Option<&str>) -> Result<Session> {
-        if force_cpu {
-            tracing::info!("🖥️  Forced CPU execution (GPU acceleration disabled)");
-            return Self::create_cpu_session(model_path);
-        }
-        
-        // Try specific provider if requested
-        if let Some(provider) = preferred_provider {
-            match provider.to_lowercase().as_str() {
-                "cpu" => {
-                    tracing::info!("🖥️  Preferred CPU execution");
-                    return Self::create_cpu_session(model_path);
-                }
-                "cuda" => {
-                    if let Ok(session) = Self::try_cuda_session(model_path) {
-                        return Ok(session);
-                    }
-                }
-                "tensorrt" => {
-                    if let Ok(session) = Self::try_tensorrt_session(model_path) {
-                        return Ok(session);
-                    }
-                }
-                "rocm" => {
-                    if let Ok(session) = Self::try_rocm_session(model_path) {
-                        return Ok(session);
-                    }
-                }
-                _ => {
-                    tracing::warn!("Unknown GPU provider '{}', trying auto-detection", provider);
-                }
-            }
-        }
-        
-        // Auto-detect GPU providers in order of preference for Nvidia GPUs
-        
-        // 1. Try TensorRT first (NVIDIA GPUs with TensorRT) - fastest for inference with lowest latency
-        if test_tensorrt_availability() {
-            if let Ok(session) = Self::try_tensorrt_session(model_path) {
-                return Ok(session);
-            }
-        }
-        
-        // 2. Try CUDA (NVIDIA GPUs) - most common, good performance  
-        if test_cuda_availability() {
-            if let Ok(session) = Self::try_cuda_session(model_path) {
-                return Ok(session);
-            }
-        }
-        
-        // 3. Try ROCm (AMD GPUs)
-        if test_rocm_availability() {
-            if let Ok(session) = Self::try_rocm_session(model_path) {
-                return Ok(session);
-            }
-        }
-        
-        // 4. Fall back to CPU with optimizations
-        tracing::info!("🖥️  Using CPU execution (no GPU acceleration available)");
-        Self::create_cpu_session(model_path)
-    }
-    
-    #[cfg(feature = "cuda")]
-    fn try_cuda_session(model_path: &Path) -> Result<Session> {
-        match Session::builder()?
-            .with_execution_providers([
-                CUDAExecutionProvider::default()
-                    .with_device_id(0)  // Use primary GPU
-                    .build()
-            ])?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?  // Maximum optimization
-            .with_intra_threads(1)?  // Single thread for GPU to avoid overhead
-            .commit_from_file(model_path) {
-            Ok(session) => {
-                tracing::info!("🚀 GPU acceleration enabled: CUDA (low-latency optimized)");
-                Ok(session)
-            }
-            Err(e) => {
-                tracing::warn!("CUDA provider failed: {}", e);
-                Err(e.into())
-            }
-        }
-    }
-    
-    #[cfg(not(feature = "cuda"))]
-    fn try_cuda_session(_model_path: &Path) -> Result<Session> {
-        Err(anyhow::anyhow!("CUDA support not compiled"))
-    }
-    
-    #[cfg(feature = "tensorrt")]
-    fn try_tensorrt_session(model_path: &Path) -> Result<Session> {
-        match Session::builder()?
-            .with_execution_providers([
-                TensorRTExecutionProvider::default()
-                    .with_device_id(0)  // Use primary GPU
-                    .build()
-            ])?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?  // Maximum optimization
-            .with_intra_threads(1)?  // Single thread for GPU to avoid overhead
-            .commit_from_file(model_path) {
-            Ok(session) => {
-                tracing::info!("🚀 GPU acceleration enabled: TensorRT (ultra low-latency optimized)");
-                Ok(session)
-            }
-            Err(e) => {
-                tracing::warn!("TensorRT provider failed: {}", e);
-                Err(e.into())
-            }
-        }
-    }
-    
-    #[cfg(not(feature = "tensorrt"))]
-    fn try_tensorrt_session(_model_path: &Path) -> Result<Session> {
-        Err(anyhow::anyhow!("TensorRT support not compiled"))
-    }
-    
-    #[cfg(feature = "rocm")]
-    fn try_rocm_session(model_path: &Path) -> Result<Session> {
-        match Session::builder()?
-            .with_execution_providers([ROCmExecutionProvider::default().build()])?
-            .commit_from_file(model_path) {
-            Ok(session) => {
-                tracing::info!("🚀 GPU acceleration enabled: ROCm (AMD)");
-                Ok(session)
-            }
-            Err(e) => {
-                tracing::warn!("ROCm provider failed: {}", e);
-                Err(e.into())
-            }
-        }
-    }
-    
-    #[cfg(not(feature = "rocm"))]
-    fn try_rocm_session(_model_path: &Path) -> Result<Session> {
-        Err(anyhow::anyhow!("ROCm support not compiled"))
-    }
     
     fn create_cpu_session(model_path: &Path) -> Result<Session> {
+        tracing::info!("🖥️ Creating CPU-optimized ONNX session with {} threads", num_cpus::get());
+        
         let session = Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(num_cpus::get())?
@@ -455,79 +184,6 @@ impl SegmentationModel {
         Ok(session)
     }
     
-    fn preprocess_image_fast(&self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<Vec<f32>> {
-        let mut input_data = Vec::with_capacity(3 * self.input_height * self.input_width);
-        
-        // Optimized preprocessing with batch operations
-        match self.model_type {
-            ModelType::YoloV8nSeg => {
-                // YOLOv8 uses 0-1 normalization, no ImageNet normalization
-                for c in 0..3 {
-                    for y in 0..self.input_height {
-                        for x in 0..self.input_width {
-                            let pixel = image.get_pixel(x as u32, y as u32);
-                            let value = pixel[c] as f32 / 255.0;
-                            input_data.push(value);
-                        }
-                    }
-                }
-            }
-            ModelType::MediaPipeSelfie => {
-                // MediaPipe Selfie uses 0-1 normalization (RGB input, not BGR)
-                for c in 0..3 {
-                    for y in 0..self.input_height {
-                        for x in 0..self.input_width {
-                            let pixel = image.get_pixel(x as u32, y as u32);
-                            let value = pixel[c] as f32 / 255.0;
-                            input_data.push(value);
-                        }
-                    }
-                }
-            }
-            ModelType::SINet => {
-                // SINet uses ImageNet normalization but may have specific requirements
-                for c in 0..3 {
-                    for y in 0..self.input_height {
-                        for x in 0..self.input_width {
-                            let pixel = image.get_pixel(x as u32, y as u32);
-                            let value = pixel[c] as f32 / 255.0;
-                            
-                            let normalized = match c {
-                                0 => (value - 0.485) / 0.229, // Red channel
-                                1 => (value - 0.456) / 0.224, // Green channel  
-                                2 => (value - 0.406) / 0.225, // Blue channel
-                                _ => unreachable!(),
-                            };
-                            
-                            input_data.push(normalized);
-                        }
-                    }
-                }
-            }
-            _ => {
-                // Default normalization (ImageNet)
-                for c in 0..3 {
-                    for y in 0..self.input_height {
-                        for x in 0..self.input_width {
-                            let pixel = image.get_pixel(x as u32, y as u32);
-                            let value = pixel[c] as f32 / 255.0;
-                            
-                            let normalized = match c {
-                                0 => (value - 0.485) / 0.229, // Red channel
-                                1 => (value - 0.456) / 0.224, // Green channel  
-                                2 => (value - 0.406) / 0.225, // Blue channel
-                                _ => unreachable!(),
-                            };
-                            
-                            input_data.push(normalized);
-                        }
-                    }
-                }
-            }
-        }
-        
-        Ok(input_data)
-    }
 
     fn preprocess_image_efficient(&mut self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<()> {
         // Clear and reuse the pre-allocated buffer for maximum efficiency
@@ -663,17 +319,6 @@ impl SegmentationModel {
             .context("Failed to create mask image")
     }
     
-    // Removed old inefficient apply_cached_mask - replaced with apply_mask_efficiently
-
-    pub fn input_dimensions(&self) -> (usize, usize) {
-        (self.input_width, self.input_height)
-    }
-    
-    // Removed get_ai_inference_interval - AI now runs on EVERY frame
-    
-    pub fn get_model_type(&self) -> &ModelType {
-        &self.model_type
-    }
 }
 
 pub async fn download_model_if_needed(hf_token: Option<String>, disable_download: bool, model_type: Option<ModelType>) -> Result<std::path::PathBuf> {
