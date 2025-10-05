@@ -2,6 +2,7 @@ mod cli;
 mod webcam;
 mod segmentation;
 mod wayland_overlay;
+mod mouse_tracker;
 
 use anyhow::{Context, Result};
 use cli::Args;

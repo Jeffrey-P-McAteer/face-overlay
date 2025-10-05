@@ -21,6 +21,7 @@ use wayland_client::{
     protocol::{wl_buffer, wl_output, wl_shm, wl_surface},
     Connection, QueueHandle,
 };
+use crate::mouse_tracker::MouseTracker;
 
 #[derive(Clone, Copy, Debug)]
 pub enum AnchorPosition {
@@ -55,6 +56,8 @@ pub struct WaylandOverlay {
     outputs: HashMap<wl_output::WlOutput, OutputInfo>,
     last_position_change: Instant,
     auto_reposition_interval: Duration,
+    mouse_tracker: MouseTracker,
+    mouse_detection_margin: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -117,7 +120,9 @@ impl WaylandOverlay {
             anchor_position,
             outputs: HashMap::new(),
             last_position_change: Instant::now(),
-            auto_reposition_interval: Duration::from_secs(10), // Move every 10 seconds
+            auto_reposition_interval: Duration::from_secs(10), // Fallback: move every 10 seconds
+            mouse_tracker: MouseTracker::new(),
+            mouse_detection_margin: 50, // Move when mouse is within 50 pixels
         };
 
         Ok((overlay, conn, event_queue))
@@ -342,8 +347,24 @@ impl WaylandOverlay {
         }
     }
 
-    /// Check if it's time to automatically reposition the overlay to avoid mouse interference
-    pub fn should_auto_reposition(&self) -> bool {
+    /// Check if mouse is near the overlay area
+    fn is_mouse_near_overlay(&mut self) -> bool {
+        if let Some((x, y, width, height)) = self.get_surface_bounds() {
+            self.mouse_tracker.is_mouse_near_area(x, y, width, height, self.mouse_detection_margin)
+        } else {
+            false
+        }
+    }
+
+    /// Check if it's time to automatically reposition the overlay
+    pub fn should_auto_reposition(&mut self) -> bool {
+        // Immediate repositioning if mouse is detected near overlay
+        if self.is_mouse_near_overlay() {
+            debug!("Mouse detected near overlay - immediate repositioning triggered");
+            return true;
+        }
+        
+        // Fallback: periodic repositioning every interval
         self.last_position_change.elapsed() >= self.auto_reposition_interval
     }
 
@@ -354,8 +375,15 @@ impl WaylandOverlay {
                 AnchorPosition::LowerLeft => AnchorPosition::LowerRight,
                 AnchorPosition::LowerRight => AnchorPosition::LowerLeft,
             };
-            info!("Auto-repositioning overlay from {:?} to {:?} to avoid mouse interference", 
-                  self.anchor_position, new_position);
+            
+            let reason = if self.is_mouse_near_overlay() {
+                "mouse detected near overlay"
+            } else {
+                "periodic auto-repositioning"
+            };
+            
+            info!("Moving overlay from {:?} to {:?} ({})", 
+                  self.anchor_position, new_position, reason);
             self.set_anchor_position(new_position, qh);
         }
     }
