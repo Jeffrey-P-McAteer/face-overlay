@@ -69,7 +69,7 @@ async fn run_application(args: Args) -> Result<()> {
         info!("Using real webcam: {}", args.device);
     }
 
-    let segmentation_model = if model_path.exists() {
+    let mut segmentation_model = if model_path.exists() {
         match SegmentationModel::new(&model_path) {
             Ok(model) => {
                 info!("AI segmentation model loaded successfully");
@@ -111,7 +111,7 @@ async fn run_application(args: Args) -> Result<()> {
         if elapsed >= frame_duration {
             if let Err(e) = process_frame(
                 &mut webcam,
-                &segmentation_model,
+                &mut segmentation_model,
                 &mut overlay,
                 &mut mouse_handler,
                 &qh,
@@ -138,7 +138,7 @@ async fn run_application(args: Args) -> Result<()> {
 
 async fn process_frame(
     webcam: &mut WebcamCapture,
-    segmentation_model: &Option<SegmentationModel>,
+    segmentation_model: &mut Option<SegmentationModel>,
     overlay: &mut WaylandOverlay,
     mouse_handler: &mut MouseEventHandler,
     qh: &wayland_client::QueueHandle<WaylandOverlay>,

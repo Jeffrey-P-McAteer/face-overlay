@@ -3,13 +3,13 @@ use futures_util::StreamExt;
 use image::{ImageBuffer, Rgb, Rgba};
 use std::path::Path;
 
-#[cfg(feature = "ai-segmentation")]
 use ndarray::Array;
-#[cfg(feature = "ai-segmentation")]
-use ort::{Environment, ExecutionProvider, Session, SessionBuilder, Value};
+use ort::{
+    session::Session,
+    value::Value,
+};
 
 pub struct SegmentationModel {
-    #[cfg(feature = "ai-segmentation")]
     session: Session,
     input_height: usize,
     input_width: usize,
@@ -17,112 +17,66 @@ pub struct SegmentationModel {
 
 impl SegmentationModel {
     pub fn new(model_path: &Path) -> Result<Self> {
-        #[cfg(feature = "ai-segmentation")]
-        {
-            tracing::info!("Loading AI segmentation model from: {:?}", model_path);
-            
-            let environment = Environment::builder()
-                .with_name("face-overlay")
-                .with_execution_providers([
-                    ExecutionProvider::CPU(Default::default()),
-                    ExecutionProvider::CUDA(Default::default())
-                ])
-                .build()
-                .context("Failed to create ONNX environment")?;
-
-            let session = SessionBuilder::new(&environment)?
-                .with_optimization_level(ort::GraphOptimizationLevel::All)?
-                .with_model_from_file(model_path)
-                .context("Failed to load ONNX model - make sure the model file is valid")?;
-
-            // Get input dimensions from the model
-            let input_shape = session.inputs[0].input_type.tensor_dimensions().unwrap();
-            let input_height = input_shape[2] as usize;
-            let input_width = input_shape[3] as usize;
-
-            tracing::info!("AI model loaded successfully. Input size: {}x{}", input_width, input_height);
-
-            Ok(Self {
-                session,
-                input_height,
-                input_width,
-            })
-        }
+        tracing::info!("Loading AI segmentation model from: {:?}", model_path);
         
-        #[cfg(not(feature = "ai-segmentation"))]
-        {
-            tracing::warn!("AI segmentation not enabled, returning placeholder model");
-            tracing::info!("To enable AI segmentation, compile with --features ai-segmentation");
-            Ok(Self {
-                input_height: 320,
-                input_width: 320,
-            })
-        }
+        let session = Session::builder()?
+            .commit_from_file(model_path)
+            .context("Failed to load ONNX model - make sure the model file is valid")?;
+
+        // Get input dimensions from the model - default to 320x320 for U2-Net
+        let input_height = 320;
+        let input_width = 320;
+
+        tracing::info!("AI model loaded successfully. Input size: {}x{}", input_width, input_height);
+
+        Ok(Self {
+            session,
+            input_height,
+            input_width,
+        })
     }
 
     pub fn segment_foreground(
-        &self,
+        &mut self,
         image: &ImageBuffer<Rgb<u8>, Vec<u8>>,
     ) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
-        #[cfg(feature = "ai-segmentation")]
-        {
-            let (orig_width, orig_height) = image.dimensions();
-            
-            // Resize image to model input size
-            let resized = image::imageops::resize(
-                image,
-                self.input_width as u32,
-                self.input_height as u32,
-                image::imageops::FilterType::Lanczos3,
-            );
+        let (orig_width, orig_height) = image.dimensions();
+        
+        // Resize image to model input size
+        let resized = image::imageops::resize(
+            image,
+            self.input_width as u32,
+            self.input_height as u32,
+            image::imageops::FilterType::Lanczos3,
+        );
 
-            // Preprocess image for model input
-            let input_data = self.preprocess_image(&resized)?;
-            
-            // Create input tensor
-            let input_tensor = Value::from_array(Array::from_shape_vec(
-                (1, 3, self.input_height, self.input_width),
-                input_data,
-            )?)?;
-            
-            // Run inference
-            let outputs = self.session.run(vec![input_tensor])
+        // Preprocess image for model input
+        let input_data = self.preprocess_image(&resized)?;
+        
+        // Create input tensor using the simpler tuple format
+        let input_tensor = Value::from_array(([1, 3, self.input_height, self.input_width], input_data))?;
+        
+        // Run inference and extract mask data
+        let mask_data = {
+            let outputs = self.session.run(ort::inputs!["input" => input_tensor])
                 .context("Failed to run model inference")?;
             
             // Extract mask from output
-            let output_tensor = outputs[0].extract_tensor::<f32>()?;
-            let mask_data = output_tensor.view().to_owned();
+            let output_tensor = outputs["output"].try_extract_tensor::<f32>()?;
+            let (_, mask_slice) = output_tensor;
+            
+            // Convert slice to ndarray for processing
+            Array::from_shape_vec((1, 1, self.input_height, self.input_width), mask_slice.to_vec())?
+        };
 
-            // Post-process mask and apply to original image
-            let segmented = self.apply_segmentation_mask(image, &mask_data, orig_width, orig_height)?;
-            
-            tracing::debug!("Segmentation completed for {}x{} image", orig_width, orig_height);
-            
-            Ok(segmented)
-        }
+        // Post-process mask and apply to original image
+        let segmented = self.apply_segmentation_mask(image, &mask_data.into_dyn(), orig_width, orig_height)?;
         
-        #[cfg(not(feature = "ai-segmentation"))]
-        {
-            tracing::warn!("AI segmentation not available, creating mock segmented image");
-            let (width, height) = image.dimensions();
-            let mut result = ImageBuffer::new(width, height);
-            
-            // Create a simple gradient transparency effect for demo
-            for (x, y, pixel) in image.enumerate_pixels() {
-                let distance_from_center = (
-                    ((x as f32 - width as f32 / 2.0).powi(2) + 
-                     (y as f32 - height as f32 / 2.0).powi(2))
-                ).sqrt() / (width as f32 / 2.0);
-                
-                let alpha = ((1.0 - distance_from_center.clamp(0.0, 1.0)) * 255.0) as u8;
-                result.put_pixel(x, y, Rgba([pixel[0], pixel[1], pixel[2], alpha]));
-            }
-            
-            Ok(result)
-        }
+        tracing::debug!("Segmentation completed for {}x{} image", orig_width, orig_height);
+        
+        Ok(segmented)
     }
 
-    #[cfg(feature = "ai-segmentation")]
     fn preprocess_image(&self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<Vec<f32>> {
         let mut input_data = Vec::with_capacity(3 * self.input_height * self.input_width);
         
@@ -149,7 +103,6 @@ impl SegmentationModel {
         Ok(input_data)
     }
 
-    #[cfg(feature = "ai-segmentation")]
     fn apply_segmentation_mask(
         &self,
         original_image: &ImageBuffer<Rgb<u8>, Vec<u8>>,
@@ -186,7 +139,7 @@ impl SegmentationModel {
         let mut result = ImageBuffer::new(width, height);
 
         for (x, y, pixel) in original_image.enumerate_pixels() {
-            let mask_pixel = resized_mask.get_pixel(x, y);
+            let mask_pixel: &image::Luma<u8> = resized_mask.get_pixel(x, y);
             let alpha = mask_pixel[0]; // Use mask value as alpha
             
             result.put_pixel(

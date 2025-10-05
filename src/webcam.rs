@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
 use image::{ImageBuffer, Rgb, RgbImage};
-use std::path::Path;
 use tracing::{debug, info, warn};
 
-#[cfg(feature = "real-camera")]
 use nokhwa::{
     pixel_format::RgbFormat,
     utils::{CameraIndex, RequestedFormat, RequestedFormatType},
@@ -11,7 +9,6 @@ use nokhwa::{
 };
 
 pub struct WebcamCapture {
-    #[cfg(feature = "real-camera")]
     camera: Option<Camera>,
     width: u32,
     height: u32,
@@ -23,48 +20,32 @@ impl WebcamCapture {
     pub fn new(device_path: Option<&str>) -> Result<Self> {
         let device = device_path.unwrap_or("/dev/video0");
         
-#[cfg(feature = "real-camera")]
-        {
-            // Try to create real camera first
-            match Self::try_create_camera(device) {
-                Ok((camera, width, height)) => {
-                    info!("Successfully opened webcam device: {} ({}x{})", device, width, height);
-                    Ok(Self {
-                        camera: Some(camera),
-                        width,
-                        height,
-                        frame_count: 0,
-                        simulated: false,
-                    })
-                }
-                Err(e) => {
-                    warn!("Failed to open webcam device {}: {}", device, e);
-                    info!("Falling back to simulated camera feed");
-                    Ok(Self {
-                        camera: None,
-                        width: 640,
-                        height: 480,
-                        frame_count: 0,
-                        simulated: true,
-                    })
-                }
+        // Try to create real camera first
+        match Self::try_create_camera(device) {
+            Ok((camera, width, height)) => {
+                info!("Successfully opened webcam device: {} ({}x{})", device, width, height);
+                Ok(Self {
+                    camera: Some(camera),
+                    width,
+                    height,
+                    frame_count: 0,
+                    simulated: false,
+                })
             }
-        }
-        
-        #[cfg(not(feature = "real-camera"))]
-        {
-            warn!("Real camera support not enabled, using simulated feed");
-            info!("To enable real webcam capture, compile with --features real-camera");
-            Ok(Self {
-                width: 640,
-                height: 480,
-                frame_count: 0,
-                simulated: true,
-            })
+            Err(e) => {
+                warn!("Failed to open webcam device {}: {} - falling back to simulated camera feed", device, e);
+                debug!("Camera initialization failed due to: {:?}", e);
+                Ok(Self {
+                    camera: None,
+                    width: 640,
+                    height: 480,
+                    frame_count: 0,
+                    simulated: true,
+                })
+            }
         }
     }
 
-    #[cfg(feature = "real-camera")]
     fn try_create_camera(device_path: &str) -> Result<(Camera, u32, u32)> {
         let index = if device_path.starts_with("/dev/video") {
             let num_str = device_path.strip_prefix("/dev/video").unwrap_or("0");
@@ -91,16 +72,16 @@ impl WebcamCapture {
     pub fn capture_frame(&mut self) -> Result<ImageBuffer<Rgb<u8>, Vec<u8>>> {
         self.frame_count += 1;
         
-#[cfg(feature = "real-camera")]
-        if let Some(camera) = &mut self.camera {
+        if let Some(camera) = self.camera.as_mut() {
             // Real camera capture
-            match self.capture_real_frame(camera) {
+            match Self::capture_real_frame_static(camera, self.width, self.height) {
                 Ok(frame) => {
                     debug!("Captured real frame {}: {}x{}", self.frame_count, self.width, self.height);
                     return Ok(frame);
                 }
                 Err(e) => {
                     warn!("Failed to capture real frame: {}, falling back to simulation", e);
+                    debug!("Camera capture error: {:?}", e);
                     self.simulated = true;
                 }
             }
@@ -112,15 +93,14 @@ impl WebcamCapture {
         Ok(buffer)
     }
 
-    #[cfg(feature = "real-camera")]
-    fn capture_real_frame(&mut self, camera: &mut Camera) -> Result<ImageBuffer<Rgb<u8>, Vec<u8>>> {
+    fn capture_real_frame_static(camera: &mut Camera, width: u32, height: u32) -> Result<ImageBuffer<Rgb<u8>, Vec<u8>>> {
         let frame = camera.frame()
             .context("Failed to capture camera frame")?;
 
         let rgb_data = frame.decode_image::<RgbFormat>()
             .context("Failed to decode camera frame")?;
 
-        let buffer = ImageBuffer::from_raw(self.width, self.height, rgb_data.into_raw())
+        let buffer = ImageBuffer::from_raw(width, height, rgb_data.into_raw())
             .context("Failed to create image buffer from camera data")?;
 
         Ok(buffer)
@@ -155,28 +135,18 @@ impl WebcamCapture {
     }
 
     pub fn stop(&mut self) -> Result<()> {
-        #[cfg(feature = "real-camera")]
         if let Some(camera) = &mut self.camera {
             camera.stop_stream()
                 .context("Failed to stop camera stream")?;
             info!("Real camera stream stopped");
-        }
-        #[cfg(not(feature = "real-camera"))]
-        {
+        } else {
             info!("Simulated camera stream stopped");
         }
         Ok(())
     }
 
     pub fn is_simulated(&self) -> bool {
-        #[cfg(feature = "real-camera")]
-        {
-            self.simulated || self.camera.is_none()
-        }
-        #[cfg(not(feature = "real-camera"))]
-        {
-            true
-        }
+        self.simulated || self.camera.is_none()
     }
 }
 

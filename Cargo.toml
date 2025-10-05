@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# Webcam capture (optional)
-nokhwa = { version = "0.10", features = ["input-v4l"], optional = true }
+# Webcam capture
+nokhwa = { version = "0.10", features = ["input-v4l"] }
 
-# AI/ML inference (optional)
-ort = { version = "2.0.0-rc.10", features = ["copy-dylibs"], optional = true }
-ndarray = { version = "0.15", optional = true }
+# AI/ML inference  
+ort = { version = "2.0.0-rc.10", features = ["copy-dylibs"] }
+ndarray = "0.15"
 
 # Wayland layer shell
 smithay-client-toolkit = { version = "0.19", default-features = false }
@@ -39,8 +39,3 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 tempfile = "3.8"
 
-[features]
-default = []
-real-camera = ["dep:nokhwa"]
-ai-segmentation = ["dep:ort", "dep:ndarray"]
-full = ["real-camera", "ai-segmentation"]
