@@ -115,25 +115,35 @@ async fn run_application(args: Args) -> Result<()> {
             //     break;
             // }
 
-            eprintln!("Before .borrow()");
             let frame_value = (*rx_camera_frame.borrow()).clone();
-            //eprintln!("frame_value = {:?}", frame_value);
             rx_camera_frame.mark_unchanged(); // Say we have observed the current value
             if let Some(frame) = frame_value {
                 if let Err(e) = process_frame(&frame, &mut segmentation_model, &mut overlay, &qh).await {
                     error!("Frame processing error: {}", e);
                     break;
                 }
+                info!("Processed frame!");
             }
 
 
             last_frame_time = now;
         }
 
-        eprintln!("Before .dispatch_pending()");
-        //event_queue.blocking_dispatch(&mut overlay).context("Failed to dispatch Wayland events")?;
-        event_queue.dispatch_pending(&mut overlay).context("Failed to dispatch Wayland events")?;
-        eprintln!("Done with event_queue.dispatch_pending");
+        // Async event handling, none of these lines block
+        match event_queue.dispatch_pending(&mut overlay).context("Failed to dispatch Wayland events") {
+            Ok(_evts) => { }
+            Err(e) => {
+                eprintln!("[ event_queue.dispatch_pending ] {:?}", e);
+            }
+        }
+        if let Some(guard) = event_queue.prepare_read() {
+            if let Err(e) = guard.read() { // read from socket
+                eprintln!("[ event_queue.prepare_read ] {:?}", e);
+            }
+        }
+        if let Err(e) = event_queue.flush() {
+            eprintln!("[ event_queue.flush ] {:?}", e);
+        }
 
         let sleep_time = frame_duration.saturating_sub(now.elapsed());
         if sleep_time > Duration::from_millis(1) {
@@ -148,34 +158,6 @@ async fn run_application(args: Args) -> Result<()> {
     Ok(())
 }
 
-// async fn process_frame(
-//     webcam: &mut WebcamCapture,
-//     segmentation_model: &mut Option<SegmentationModel>,
-//     overlay: &mut WaylandOverlay,
-//     qh: &wayland_client::QueueHandle<WaylandOverlay>,
-// ) -> Result<()> {
-//     let frame= webcam.capture_frame().context("Failed to capture webcam frame")?;
-//     let (width, height) = frame.dimensions();
-
-//     let processed_frame = match segmentation_model {
-//         Some(model) => model.segment_foreground(&frame).unwrap_or_else(|_| {
-//             ImageBuffer::from_fn(width, height, |x, y| {
-//                 let pixel = frame.get_pixel(x, y);
-//                 image::Rgba([pixel[0], pixel[1], pixel[2], 255])
-//             })
-//         }),
-//         None => ImageBuffer::from_fn(width, height, |x, y| {
-//             let pixel = frame.get_pixel(x, y);
-//             image::Rgba([pixel[0], pixel[1], pixel[2], 255])
-//         }),
-//     };
-
-//     // Automatically reposition overlay periodically to avoid mouse interference
-//     overlay.auto_reposition(qh);
-
-//     overlay.update_frame(&processed_frame, qh).context("Failed to update overlay frame")
-// }
-
 async fn process_frame(
     frame: &ImageBuffer<Rgb<u8>, Vec<u8>>,
     segmentation_model: &mut Option<SegmentationModel>,
@@ -185,7 +167,7 @@ async fn process_frame(
     let (width, height) = frame.dimensions();
 
     let processed_frame = match segmentation_model {
-        Some(model) => model.segment_foreground(&frame).unwrap_or_else(|_| {
+        Some(model) => model.segment_foreground(frame).unwrap_or_else(|_| {
             ImageBuffer::from_fn(width, height, |x, y| {
                 let pixel = frame.get_pixel(x, y);
                 image::Rgba([pixel[0], pixel[1], pixel[2], 255])
@@ -196,6 +178,10 @@ async fn process_frame(
             image::Rgba([pixel[0], pixel[1], pixel[2], 255])
         }),
     };
+
+    // for i in 0..100 {
+    //     processed_frame.put_pixel(i, i, image::Rgba([255u8, 255u8, 255u8, 255u8]) );
+    // }
 
     // Automatically reposition overlay periodically to avoid mouse interference
     overlay.auto_reposition(qh);
