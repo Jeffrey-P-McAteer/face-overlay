@@ -55,12 +55,6 @@ pub struct Args {
     )]
     pub height: u32,
 
-    #[arg(
-        long = "mouse-flip-delay",
-        default_value = "1000",
-        help = "Delay in milliseconds before flipping overlay when mouse overlaps"
-    )]
-    pub mouse_flip_delay: u64,
 
     #[arg(
         short = 'v',
@@ -70,11 +64,6 @@ pub struct Args {
     )]
     pub verbose: u8,
 
-    #[arg(
-        long = "disable-mouse-flip",
-        help = "Disable automatic flipping when mouse cursor overlaps"
-    )]
-    pub disable_mouse_flip: bool,
 
     #[arg(
         long = "fps",

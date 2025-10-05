@@ -2,11 +2,10 @@ use anyhow::{Context, Result};
 use image::{ImageBuffer, Rgba};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_seat, delegate_pointer,
+    delegate_compositor, delegate_layer, delegate_output, delegate_registry,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
-    seat::{SeatHandler, SeatState, pointer::PointerHandler},
     shell::{
         wlr_layer::{
             Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
@@ -15,6 +14,7 @@ use smithay_client_toolkit::{
     },
 };
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 use wayland_client::{
     globals::registry_queue_init,
@@ -41,7 +41,6 @@ pub struct WaylandOverlay {
     registry_state: RegistryState,
     output_state: OutputState,
     compositor_state: CompositorState,
-    seat_state: SeatState,
     shm: wayland_client::protocol::wl_shm::WlShm,
     layer_shell: LayerShell,
     
@@ -54,7 +53,8 @@ pub struct WaylandOverlay {
     anchor_position: AnchorPosition,
     
     outputs: HashMap<wl_output::WlOutput, OutputInfo>,
-    last_pointer_position: (f64, f64),
+    last_position_change: Instant,
+    auto_reposition_interval: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -93,7 +93,6 @@ impl WaylandOverlay {
         let compositor_state = CompositorState::bind(&globals, &qh)
             .context("Compositor not available - this usually means the Wayland compositor doesn't support the required protocols")?;
         
-        let seat_state = SeatState::new(&globals, &qh);
         
         let shm = globals
             .bind::<wayland_client::protocol::wl_shm::WlShm, _, _>(&qh, 1..=1, ())
@@ -108,7 +107,6 @@ impl WaylandOverlay {
             registry_state,
             output_state,
             compositor_state,
-            seat_state,
             shm,
             layer_shell,
             layer_surface: None,
@@ -118,7 +116,8 @@ impl WaylandOverlay {
             height,
             anchor_position,
             outputs: HashMap::new(),
-            last_pointer_position: (0.0, 0.0),
+            last_position_change: Instant::now(),
+            auto_reposition_interval: Duration::from_secs(10), // Move every 10 seconds
         };
 
         Ok((overlay, conn, event_queue))
@@ -145,12 +144,12 @@ impl WaylandOverlay {
 
         let surface_clone = layer_surface.wl_surface().clone();
         
-        // Create an explicit empty region for true input pass-through in Sway/wlr-layer-shell
+        // Create an explicit empty region for true input pass-through
         let compositor = &self.compositor_state.wl_compositor().clone();
         let empty_region = compositor.create_region(qh, ());
         // Don't add any rectangles to the region - leave it empty for full pass-through
         
-        // Set the empty input region to ensure no mouse/keyboard events are captured
+        // Set the empty input region to ensure ALL mouse/keyboard events pass through
         surface_clone.set_input_region(Some(&empty_region));
         surface_clone.commit();
         
@@ -332,13 +331,32 @@ impl WaylandOverlay {
         Ok(())
     }
 
-    pub fn set_anchor_position(&mut self, position: AnchorPosition, _qh: &QueueHandle<Self>) {
+    pub fn set_anchor_position(&mut self, position: AnchorPosition, qh: &QueueHandle<Self>) {
         if let Some(layer_surface) = &self.layer_surface {
             self.anchor_position = position;
+            self.last_position_change = Instant::now();
             layer_surface.set_anchor(position.into());
             layer_surface.wl_surface().commit();
             
             info!("Changed anchor position to: {:?}", position);
+        }
+    }
+
+    /// Check if it's time to automatically reposition the overlay to avoid mouse interference
+    pub fn should_auto_reposition(&self) -> bool {
+        self.last_position_change.elapsed() >= self.auto_reposition_interval
+    }
+
+    /// Automatically move to the opposite corner to get out of the way
+    pub fn auto_reposition(&mut self, qh: &QueueHandle<Self>) {
+        if self.should_auto_reposition() {
+            let new_position = match self.anchor_position {
+                AnchorPosition::LowerLeft => AnchorPosition::LowerRight,
+                AnchorPosition::LowerRight => AnchorPosition::LowerLeft,
+            };
+            info!("Auto-repositioning overlay from {:?} to {:?} to avoid mouse interference", 
+                  self.anchor_position, new_position);
+            self.set_anchor_position(new_position, qh);
         }
     }
 
@@ -358,10 +376,6 @@ impl WaylandOverlay {
         }
     }
 
-    // Get current mouse position from Wayland seat protocol
-    pub fn get_mouse_position(&self) -> (i32, i32) {
-        (self.last_pointer_position.0 as i32, self.last_pointer_position.1 as i32)
-    }
 
     fn get_screen_width(&self) -> i32 {
         self.outputs.values().map(|o| o.width).max().unwrap_or(1920)
@@ -546,74 +560,8 @@ impl wayland_client::Dispatch<wayland_client::protocol::wl_region::WlRegion, ()>
 }
 
 
-// Implement SeatHandler for seat events (device adding/removing)
-impl SeatHandler for WaylandOverlay {
-    fn seat_state(&mut self) -> &mut SeatState {
-        &mut self.seat_state
-    }
-
-    fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wayland_client::protocol::wl_seat::WlSeat) {
-        debug!("New seat detected for mouse position tracking");
-    }
-
-    fn new_capability(
-        &mut self,
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-        seat: wayland_client::protocol::wl_seat::WlSeat,
-        capability: smithay_client_toolkit::seat::Capability,
-    ) {
-        if capability == smithay_client_toolkit::seat::Capability::Pointer {
-            debug!("Pointer capability detected, enabling mouse position tracking");
-            // Get pointer object for position tracking
-            if self.seat_state.get_pointer(qh, &seat).is_ok() {
-                debug!("Successfully obtained pointer object for position tracking");
-            }
-        }
-    }
-
-    fn remove_capability(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _seat: wayland_client::protocol::wl_seat::WlSeat,
-        capability: smithay_client_toolkit::seat::Capability,
-    ) {
-        if capability == smithay_client_toolkit::seat::Capability::Pointer {
-            debug!("Pointer capability removed");
-        }
-    }
-
-    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wayland_client::protocol::wl_seat::WlSeat) {
-        debug!("Seat removed");
-    }
-}
-
-// Implement PointerHandler for mouse position tracking
-impl PointerHandler for WaylandOverlay {
-    fn pointer_frame(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _pointer: &wayland_client::protocol::wl_pointer::WlPointer,
-        events: &[smithay_client_toolkit::seat::pointer::PointerEvent],
-    ) {
-        // Process pointer events to track mouse position for dwell detection
-        for event in events {
-            match event.kind {
-                smithay_client_toolkit::seat::pointer::PointerEventKind::Motion { time: _ } => {
-                    self.last_pointer_position = event.position;
-                    debug!("Mouse position updated: ({:.1}, {:.1})", event.position.0, event.position.1);
-                }
-                _ => {} // Ignore other events (clicks, scrolls) since we have pass-through enabled
-            }
-        }
-    }
-}
 
 delegate_compositor!(WaylandOverlay);
 delegate_output!(WaylandOverlay);
 delegate_layer!(WaylandOverlay);
 delegate_registry!(WaylandOverlay);
-delegate_seat!(WaylandOverlay);
-delegate_pointer!(WaylandOverlay);

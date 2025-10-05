@@ -2,12 +2,10 @@ mod cli;
 mod webcam;
 mod segmentation;
 mod wayland_overlay;
-mod mouse_tracker;
 
 use anyhow::{Context, Result};
 use cli::Args;
 use image::ImageBuffer;
-use mouse_tracker::MouseEventHandler;
 use segmentation::{download_model_if_needed, read_hf_token_from_file, SegmentationModel, ModelType};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -76,8 +74,6 @@ async fn run_application(args: Args) -> Result<()> {
     overlay.create_layer_surface(&qh)
         .context("Failed to create layer surface")?;
 
-    let mut mouse_handler = MouseEventHandler::new(args.mouse_flip_delay, !args.disable_mouse_flip)
-        .unwrap_or_else(|_| MouseEventHandler::new(args.mouse_flip_delay, false).unwrap());
 
     let frame_duration = Duration::from_millis(1000 / args.fps as u64);
     let mut last_frame_time = Instant::now();
@@ -87,7 +83,7 @@ async fn run_application(args: Args) -> Result<()> {
         let elapsed = now.duration_since(last_frame_time);
 
         if elapsed >= frame_duration {
-            if let Err(e) = process_frame(&mut webcam, &mut segmentation_model, &mut overlay, &mut mouse_handler, &qh).await {
+            if let Err(e) = process_frame(&mut webcam, &mut segmentation_model, &mut overlay, &qh).await {
                 error!("Frame processing error: {}", e);
                 break;
             }
@@ -109,7 +105,6 @@ async fn process_frame(
     webcam: &mut WebcamCapture,
     segmentation_model: &mut Option<SegmentationModel>,
     overlay: &mut WaylandOverlay,
-    mouse_handler: &mut MouseEventHandler,
     qh: &wayland_client::QueueHandle<WaylandOverlay>,
 ) -> Result<()> {
     let frame = webcam.capture_frame().context("Failed to capture webcam frame")?;
@@ -128,14 +123,8 @@ async fn process_frame(
         }),
     };
 
-    if mouse_handler.check_for_flip(overlay.get_surface_bounds(), overlay.get_mouse_position()) {
-        let new_anchor = match overlay.get_anchor_position() {
-            AnchorPosition::LowerLeft => AnchorPosition::LowerRight,
-            AnchorPosition::LowerRight => AnchorPosition::LowerLeft,
-        };
-        overlay.set_anchor_position(new_anchor, qh);
-        mouse_handler.reset_flip_state();
-    }
+    // Automatically reposition overlay periodically to avoid mouse interference
+    overlay.auto_reposition(qh);
 
     overlay.update_frame(&processed_frame, qh).context("Failed to update overlay frame")
 }
