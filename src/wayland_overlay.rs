@@ -59,6 +59,10 @@ pub struct WaylandOverlay {
     auto_reposition_interval: Duration,
     mouse_tracker: MouseTracker,
     mouse_detection_margin: i32,
+    
+    // File descriptor tracking for resource management
+    current_shm_fd: Option<i32>,
+    current_buffer_size: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +129,8 @@ impl WaylandOverlay {
             auto_reposition_interval: Duration::from_secs(2), // Fallback: move every 2 seconds
             mouse_tracker: MouseTracker::new(),
             mouse_detection_margin: 25, // Move when mouse is within 50 pixels
+            current_shm_fd: None,
+            current_buffer_size: 0,
         };
 
         Ok((overlay, conn, event_queue))
@@ -174,36 +180,56 @@ impl WaylandOverlay {
     }
 
     pub fn update_frame(&mut self, image: &ImageBuffer<Rgba<u8>, Vec<u8>>, qh: &QueueHandle<Self>) -> Result<()> {
-        let Some(layer_surface) = &self.layer_surface else {
+        // Check if layer surface exists (avoid borrowing issues)
+        if self.layer_surface.is_none() {
             warn!("No layer surface available for frame update");
             return Ok(());
-        };
-
-        let (img_width, img_height) = image.dimensions();
-        
-        // Update surface size if image dimensions changed
-        if img_width != self.width || img_height != self.height {
-            self.width = img_width;
-            self.height = img_height;
-            layer_surface.set_size(self.width, self.height);
-            
-            // Size changed - would need to recreate SHM pool in full implementation
-            debug!("Layer surface size changed to {}x{}", self.width, self.height);
         }
 
-        // Create shared memory buffer for actual pixel display
-        let stride = self.width * 4; // 4 bytes per pixel (ARGB)
-        let buffer_size = stride * self.height;
+        let (img_width, img_height) = image.dimensions();
+        let stride = img_width * 4; // 4 bytes per pixel (ARGB)
+        let buffer_size = stride * img_height;
         
-        // Create a simple shared memory buffer using memfd
-        let shm_fd = self.create_shm_fd(buffer_size as usize)?;
+        // Check if we need to recreate SHM pool (size change or first time)
+        let need_new_pool = self.pool.is_none() || 
+            img_width != self.width || 
+            img_height != self.height ||
+            buffer_size != self.current_buffer_size;
         
-        // Create Wayland SHM pool
-        use std::os::fd::BorrowedFd;
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(shm_fd) };
-        let pool = self.shm.create_pool(borrowed_fd, buffer_size as i32, qh, ());
+        if need_new_pool {
+            debug!("Recreating SHM pool: size changed from {}x{} ({} bytes) to {}x{} ({} bytes)", 
+                   self.width, self.height, self.current_buffer_size, 
+                   img_width, img_height, buffer_size);
+            
+            // Clean up existing resources first
+            self.cleanup_shm_resources();
+            
+            // Update dimensions and layer surface size
+            if img_width != self.width || img_height != self.height {
+                self.width = img_width;
+                self.height = img_height;
+                if let Some(layer_surface) = &self.layer_surface {
+                    layer_surface.set_size(self.width, self.height);
+                }
+                debug!("Layer surface size changed to {}x{}", self.width, self.height);
+            }
+            
+            // Create new shared memory buffer
+            let shm_fd = self.create_shm_fd(buffer_size as usize)?;
+            
+            // Create Wayland SHM pool
+            use std::os::fd::BorrowedFd;
+            let borrowed_fd = unsafe { BorrowedFd::borrow_raw(shm_fd) };
+            let pool = self.shm.create_pool(borrowed_fd, buffer_size as i32, qh, ());
+            
+            // Store new resources
+            self.pool = Some(pool);
+            self.current_shm_fd = Some(shm_fd);
+            self.current_buffer_size = buffer_size;
+        }
         
-        // Create buffer from pool
+        // Create buffer from existing pool
+        let pool = self.pool.as_ref().unwrap();
         let buffer = pool.create_buffer(
             0,                           // offset
             self.width as i32,          // width
@@ -214,16 +240,47 @@ impl WaylandOverlay {
             (),
         );
         
-        // Write pixel data to shared memory
-        self.write_pixels_to_shm(image, shm_fd, buffer_size as usize)?;
+        // Write pixel data to shared memory (reuse existing FD)
+        if let Some(shm_fd) = self.current_shm_fd {
+            self.write_pixels_to_shm(image, shm_fd, buffer_size as usize)?;
+        } else {
+            anyhow::bail!("No shared memory file descriptor available");
+        }
         
-        // Attach buffer and commit
-        let surface = layer_surface.wl_surface();
-        surface.attach(Some(&buffer), 0, 0);
-        surface.damage(0, 0, self.width as i32, self.height as i32);
-        surface.commit();
+        // Attach buffer and commit (get layer_surface reference here)
+        if let Some(layer_surface) = &self.layer_surface {
+            let surface = layer_surface.wl_surface();
+            surface.attach(Some(&buffer), 0, 0);
+            surface.damage(0, 0, self.width as i32, self.height as i32);
+            surface.commit();
+        }
         
-        // Clean up old buffer
+        // Clean up old buffer (but keep pool and FD for reuse)
+        if let Some(old_buffer) = self.buffer.take() {
+            old_buffer.destroy();
+        }
+        
+        // Store new buffer
+        self.buffer = Some(buffer);
+        
+        debug!("Frame updated: {}x{} with {} SHM pool", 
+               self.width, self.height,
+               if need_new_pool { "new" } else { "reused" });
+        
+        Ok(())
+    }
+
+    /// Clean up shared memory resources to prevent file descriptor leaks
+    fn cleanup_shm_resources(&mut self) {
+        // Close current file descriptor if exists
+        if let Some(fd) = self.current_shm_fd.take() {
+            unsafe {
+                libc::close(fd);
+            }
+            debug!("Closed shared memory file descriptor: {}", fd);
+        }
+        
+        // Clean up old Wayland resources
         if let Some(old_buffer) = self.buffer.take() {
             old_buffer.destroy();
         }
@@ -231,18 +288,11 @@ impl WaylandOverlay {
             old_pool.destroy();
         }
         
-        // Store new resources
-        self.buffer = Some(buffer);
-        self.pool = Some(pool);
-        
-        debug!("Frame updated: {}x{} with actual pixel data displayed", self.width, self.height);
-        
-        Ok(())
+        self.current_buffer_size = 0;
     }
 
     fn create_shm_fd(&self, size: usize) -> Result<i32> {
         use std::ffi::CString;
-        use std::os::unix::io::AsRawFd;
         
         // Create anonymous file descriptor using memfd_create
         let name = CString::new("face-overlay-shm").unwrap();
@@ -250,34 +300,47 @@ impl WaylandOverlay {
             libc::syscall(libc::SYS_memfd_create, name.as_ptr(), libc::MFD_CLOEXEC)
         };
         
-        if fd == -1 {
-            // Fallback to tmpfile if memfd_create fails
-            let file = tempfile::tempfile()
-                .context("Failed to create temporary file for SHM")?;
-            let fd = file.as_raw_fd();
+        let fd = if fd == -1 {
+            // Fallback to creating a temporary file if memfd_create fails
+            warn!("memfd_create failed, falling back to temporary file");
             
-            // Truncate to required size
-            unsafe {
-                if libc::ftruncate(fd, size as i64) == -1 {
-                    anyhow::bail!("Failed to resize SHM file");
+            // Create a temporary file manually to get better control
+            let temp_path = std::env::temp_dir().join(format!("face-overlay-shm-{}", std::process::id()));
+            let fd = unsafe {
+                let path_cstr = CString::new(temp_path.to_str().unwrap()).unwrap();
+                let fd = libc::open(
+                    path_cstr.as_ptr(),
+                    libc::O_CREAT | libc::O_RDWR | libc::O_EXCL | libc::O_CLOEXEC,
+                    0o600
+                );
+                
+                if fd != -1 {
+                    // Unlink the file immediately so it gets cleaned up when closed
+                    libc::unlink(path_cstr.as_ptr());
                 }
+                
+                fd
+            };
+            
+            if fd == -1 {
+                anyhow::bail!("Failed to create temporary file for SHM");
             }
             
-            // Leak the file handle to keep it alive
-            std::mem::forget(file);
-            Ok(fd)
+            fd
         } else {
-            let fd = fd as i32;
-            
-            // Truncate to required size
-            unsafe {
-                if libc::ftruncate(fd, size as i64) == -1 {
-                    anyhow::bail!("Failed to resize SHM file");
-                }
+            fd as i32
+        };
+        
+        // Truncate to required size
+        unsafe {
+            if libc::ftruncate(fd, size as i64) == -1 {
+                libc::close(fd); // Clean up on error
+                anyhow::bail!("Failed to resize SHM file");
             }
-            
-            Ok(fd)
         }
+        
+        debug!("Created SHM file descriptor {} for {} bytes", fd, size);
+        Ok(fd)
     }
     
     fn write_pixels_to_shm(&self, image: &ImageBuffer<Rgba<u8>, Vec<u8>>, fd: i32, size: usize) -> Result<()> {
@@ -338,7 +401,7 @@ impl WaylandOverlay {
         Ok(())
     }
 
-    pub fn set_anchor_position(&mut self, position: AnchorPosition, qh: &QueueHandle<Self>) {
+    pub fn set_anchor_position(&mut self, position: AnchorPosition, _qh: &QueueHandle<Self>) {
         if let Some(layer_surface) = &self.layer_surface {
             self.anchor_position = position;
             self.last_position_change = Instant::now();
@@ -448,6 +511,32 @@ impl WaylandOverlay {
 
     fn get_screen_height(&self) -> i32 {
         self.outputs.values().map(|o| o.height).max().unwrap_or(1080)
+    }
+    
+    /// Get current file descriptor usage count for monitoring
+    pub fn check_fd_usage(&self) -> Result<usize> {
+        let proc_fd_dir = format!("/proc/{}/fd", std::process::id());
+        match std::fs::read_dir(&proc_fd_dir) {
+            Ok(entries) => Ok(entries.count()),
+            Err(_) => {
+                // Fallback: just report if we have FDs tracked
+                Ok(if self.current_shm_fd.is_some() { 1 } else { 0 })
+            }
+        }
+    }
+}
+
+impl Drop for WaylandOverlay {
+    fn drop(&mut self) {
+        info!("Cleaning up WaylandOverlay resources");
+        self.cleanup_shm_resources();
+        
+        // Additional cleanup for Wayland resources if needed
+        if let Some(_layer_surface) = self.layer_surface.take() {
+            // Layer surface will be cleaned up by Wayland
+        }
+        
+        debug!("WaylandOverlay cleanup completed");
     }
 }
 
