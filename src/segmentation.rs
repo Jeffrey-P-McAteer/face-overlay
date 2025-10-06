@@ -47,8 +47,8 @@ impl ModelType {
 
 pub struct SegmentationModel {
     session: Session,
-    input_height: usize,
-    input_width: usize,
+    pub input_height: usize,
+    pub input_width: usize,
     model_type: ModelType,
     // Pre-allocated buffer for AI data reuse and maximum efficiency
     input_buffer: Vec<f32>,
@@ -79,7 +79,7 @@ impl SegmentationModel {
         self.apply_mask_efficiently(image, &mask)
     }
     
-    fn run_efficient_ai_inference(&mut self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
+    pub fn run_efficient_ai_inference(&mut self, image: &ImageBuffer<Rgb<u8>, Vec<u8>>) -> Result<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
         self.preprocess_image_efficient(image)?;
         let input_tensor = Value::from_array(([1, 3, self.input_height, self.input_width], self.input_buffer.clone()))?;
         let input_name = self.session.inputs[0].name.clone();
@@ -102,6 +102,22 @@ impl SegmentationModel {
             *pixel = image::Rgba([rgb_pixel[0], rgb_pixel[1], rgb_pixel[2], alpha]);
         }
         
+        Ok(result)
+    }
+
+    pub fn apply_mask_efficiently_public(image: &ImageBuffer<Rgb<u8>, Vec<u8>>, mask: &ImageBuffer<image::Luma<u8>, Vec<u8>>) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+        let (width, height) = image.dimensions();
+        let (mask_width, mask_height) = mask.dimensions();
+        let mut result = ImageBuffer::new(width, height);
+
+        for (x, y, pixel) in result.enumerate_pixels_mut() {
+            let rgb_pixel = image.get_pixel(x, y);
+            let mask_x = (x * mask_width / width).min(mask_width - 1);
+            let mask_y = (y * mask_height / height).min(mask_height - 1);
+            let alpha = mask.get_pixel(mask_x, mask_y)[0];
+            *pixel = image::Rgba([rgb_pixel[0], rgb_pixel[1], rgb_pixel[2], alpha]);
+        }
+
         Ok(result)
     }
     

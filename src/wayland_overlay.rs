@@ -382,7 +382,7 @@ impl WaylandOverlay {
     pub fn auto_reposition(&mut self, qh: &QueueHandle<Self>) {
         if self.should_auto_reposition() {
             let is_near_overlay = self.is_mouse_near_overlay();
-            eprintln!("is_near_overlay = {} (mouse pos = {:?})", is_near_overlay, self.mouse_tracker.get_mouse_position());
+            info!("is_near_overlay = {} (mouse pos = {:?})", is_near_overlay, self.mouse_tracker.get_mouse_position());
             let new_position = if is_near_overlay {
                 match self.anchor_position { // Flip to opposite side
                     AnchorPosition::LowerLeft => AnchorPosition::LowerRight,
