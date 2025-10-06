@@ -227,11 +227,6 @@ async fn run_application(args: Args) -> Result<()> {
             }
         }
 
-        let sleep_time = frame_duration.saturating_sub(now.elapsed());
-        if sleep_time > Duration::from_millis(1) {
-            sleep(sleep_time).await;
-        }
-
         if webcam_task.is_finished() || slicer_task.is_finished() {
             break;
         }
