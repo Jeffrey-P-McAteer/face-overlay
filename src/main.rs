@@ -15,6 +15,7 @@ use segmentation::{download_model_if_needed, read_hf_token_from_file, Segmentati
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{error, info};
+use std::collections::VecDeque;
 use wayland_overlay::{AnchorPosition, WaylandOverlay};
 use webcam::WebcamCapture;
 
@@ -24,11 +25,11 @@ fn load_model(path: &std::path::Path, model_type: ModelType) -> Option<Segmentat
             return Some(model);
         }
     }
-    
+
     let u2net_path = std::env::var("HOME")
         .map(|home| std::path::PathBuf::from(format!("{}/.cache/face-overlay-data/u2net.onnx", home)))
         .unwrap_or_default();
-    
+
     if u2net_path.exists() && model_type != ModelType::U2Net {
         SegmentationModel::new(&u2net_path, ModelType::U2Net).ok()
     } else {
@@ -57,7 +58,7 @@ async fn main() -> Result<()> {
 async fn run_application(args: Args) -> Result<()> {
     let hf_token = args.hf_token_file.as_ref()
         .and_then(|f| read_hf_token_from_file(f).ok());
-    
+
     let model_path = if let Some(_) = args.model_path {
         args.get_model_path()
     } else {
@@ -83,6 +84,11 @@ async fn run_application(args: Args) -> Result<()> {
 
     let frame_duration = Duration::from_millis(1000 / args.fps as u64);
     let mut last_frame_time = Instant::now();
+
+    // FPS tracking for rolling average of last 20 frames
+    let mut frame_times: VecDeque<Instant> = VecDeque::with_capacity(20);
+    let mut frame_count = 0u64;
+    let mut last_fps_report = Instant::now();
 
     // Write "true" to signal that threads should exit
     let thread_cancel_bool = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -191,6 +197,31 @@ async fn run_application(args: Args) -> Result<()> {
         let elapsed = now.duration_since(last_frame_time);
 
         if elapsed >= frame_duration {
+            // Track frame timing for FPS calculation
+            frame_times.push_back(now);
+            frame_count += 1;
+
+            // Keep only last 20 frame times
+            if frame_times.len() > 20 {
+                frame_times.pop_front();
+            }
+
+            // Calculate and report FPS every second
+            if last_fps_report.elapsed() >= Duration::from_secs(1) {
+                let rolling_fps = if frame_times.len() >= 2 {
+                    let time_span = frame_times.back().unwrap().duration_since(*frame_times.front().unwrap());
+                    if time_span.as_millis() > 0 {
+                        (frame_times.len() - 1) as f64 / time_span.as_secs_f64()
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                };
+
+                info!("FPS: {:.1} (rolling avg of last {} frames)", rolling_fps, frame_times.len());
+                last_fps_report = now;
+            }
 
             let frame_value = (*rx_sliced_frame.borrow()).clone();
             rx_sliced_frame.mark_unchanged(); // Say we have observed the current value
