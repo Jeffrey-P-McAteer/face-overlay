@@ -23,7 +23,7 @@ use wayland_client::{
 };
 use crate::mouse_tracker::MouseTracker;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AnchorPosition {
     LowerLeft,
     LowerRight,
@@ -52,6 +52,7 @@ pub struct WaylandOverlay {
     width: u32,
     height: u32,
     anchor_position: AnchorPosition,
+    ideal_anchor_position: AnchorPosition,
     
     outputs: HashMap<wl_output::WlOutput, OutputInfo>,
     last_position_change: Instant,
@@ -118,11 +119,12 @@ impl WaylandOverlay {
             width,
             height,
             anchor_position,
+            ideal_anchor_position: anchor_position.clone(),
             outputs: HashMap::new(),
             last_position_change: Instant::now(),
-            auto_reposition_interval: Duration::from_secs(10), // Fallback: move every 10 seconds
+            auto_reposition_interval: Duration::from_secs(2), // Fallback: move every 2 seconds
             mouse_tracker: MouseTracker::new(),
-            mouse_detection_margin: 50, // Move when mouse is within 50 pixels
+            mouse_detection_margin: 25, // Move when mouse is within 50 pixels
         };
 
         Ok((overlay, conn, event_queue))
@@ -356,6 +358,14 @@ impl WaylandOverlay {
         }
     }
 
+    fn is_mouse_near_overlay_ap(&mut self, ap: AnchorPosition) -> bool {
+        if let Some((x, y, width, height)) = self.get_surface_bounds_ap(ap) {
+            self.mouse_tracker.is_mouse_near_area(x, y, width, height, self.mouse_detection_margin)
+        } else {
+            false
+        }
+    }
+
     /// Check if it's time to automatically reposition the overlay
     pub fn should_auto_reposition(&mut self) -> bool {
         // Immediate repositioning if mouse is detected near overlay
@@ -371,17 +381,32 @@ impl WaylandOverlay {
     /// Automatically move to the opposite corner to get out of the way
     pub fn auto_reposition(&mut self, qh: &QueueHandle<Self>) {
         if self.should_auto_reposition() {
-            let new_position = match self.anchor_position {
-                AnchorPosition::LowerLeft => AnchorPosition::LowerRight,
-                AnchorPosition::LowerRight => AnchorPosition::LowerLeft,
+            let is_near_overlay = self.is_mouse_near_overlay();
+            eprintln!("is_near_overlay = {} (mouse pos = {:?})", is_near_overlay, self.mouse_tracker.get_mouse_position());
+            let new_position = if is_near_overlay {
+                match self.anchor_position { // Flip to opposite side
+                    AnchorPosition::LowerLeft => AnchorPosition::LowerRight,
+                    AnchorPosition::LowerRight => AnchorPosition::LowerLeft,
+                }
+            }
+            // Is mouse near left/right? Move to opposite.
+            else if self.anchor_position == AnchorPosition::LowerLeft && self.ideal_anchor_position == AnchorPosition::LowerRight && !self.is_mouse_near_overlay_ap(AnchorPosition::LowerRight) {
+                self.ideal_anchor_position.clone()
+            }
+            else if self.anchor_position == AnchorPosition::LowerRight && self.ideal_anchor_position == AnchorPosition::LowerLeft && !self.is_mouse_near_overlay_ap(AnchorPosition::LowerLeft) {
+                self.ideal_anchor_position.clone()
+            }
+            else {
+                // Keep same position b/c the mouse overlaps the ideal (or we are already there)
+                self.anchor_position.clone()
             };
-            
-            let reason = if self.is_mouse_near_overlay() {
+
+            let reason = if is_near_overlay {
                 "mouse detected near overlay"
             } else {
                 "periodic auto-repositioning"
             };
-            
+
             info!("Moving overlay from {:?} to {:?} ({})", 
                   self.anchor_position, new_position, reason);
             self.set_anchor_position(new_position, qh);
@@ -395,6 +420,18 @@ impl WaylandOverlay {
     pub fn get_surface_bounds(&self) -> Option<(i32, i32, i32, i32)> {
         if self.layer_surface.is_some() {
             let (x, y) = match self.anchor_position {
+                AnchorPosition::LowerLeft => (0, self.get_screen_height() - self.height as i32),
+                AnchorPosition::LowerRight => (self.get_screen_width() - self.width as i32, self.get_screen_height() - self.height as i32),
+            };
+            Some((x, y, self.width as i32, self.height as i32))
+        } else {
+            None
+        }
+    }
+
+    pub fn get_surface_bounds_ap(&self, ap: AnchorPosition) -> Option<(i32, i32, i32, i32)> {
+        if self.layer_surface.is_some() {
+            let (x, y) = match ap {
                 AnchorPosition::LowerLeft => (0, self.get_screen_height() - self.height as i32),
                 AnchorPosition::LowerRight => (self.get_screen_width() - self.width as i32, self.get_screen_height() - self.height as i32),
             };

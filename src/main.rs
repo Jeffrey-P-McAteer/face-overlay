@@ -122,27 +122,29 @@ async fn run_application(args: Args) -> Result<()> {
                     error!("Frame processing error: {}", e);
                     break;
                 }
-                info!("Processed frame!");
             }
-
 
             last_frame_time = now;
         }
 
         // Async event handling, none of these lines block
-        match event_queue.dispatch_pending(&mut overlay).context("Failed to dispatch Wayland events") {
-            Ok(_evts) => { }
-            Err(e) => {
-                eprintln!("[ event_queue.dispatch_pending ] {:?}", e);
+        for _ in 0..12 {
+            match event_queue.dispatch_pending(&mut overlay).context("Failed to dispatch Wayland events") {
+                Ok(_evts) => { }
+                Err(e) => {
+                    eprintln!("[ event_queue.dispatch_pending ] {:?}", e);
+                }
             }
-        }
-        if let Some(guard) = event_queue.prepare_read() {
-            if let Err(e) = guard.read() { // read from socket
-                eprintln!("[ event_queue.prepare_read ] {:?}", e);
+            if let Some(guard) = event_queue.prepare_read() {
+                if let Err(e) = guard.read() { // read from socket
+                    if !format!("{:?}", e).contains("WouldBlock") {
+                        eprintln!("[ event_queue.prepare_read ] {:?}", e);
+                    }
+                }
             }
-        }
-        if let Err(e) = event_queue.flush() {
-            eprintln!("[ event_queue.flush ] {:?}", e);
+            if let Err(e) = event_queue.flush() {
+                eprintln!("[ event_queue.flush ] {:?}", e);
+            }
         }
 
         let sleep_time = frame_duration.saturating_sub(now.elapsed());
