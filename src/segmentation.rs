@@ -108,19 +108,139 @@ impl SegmentationModel {
     pub fn apply_mask_efficiently_public(image: &ImageBuffer<Rgb<u8>, Vec<u8>>, mask: &ImageBuffer<image::Luma<u8>, Vec<u8>>) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
         let (width, height) = image.dimensions();
         let (mask_width, mask_height) = mask.dimensions();
-        let mut result = ImageBuffer::new(width, height);
-
-        for (x, y, pixel) in result.enumerate_pixels_mut() {
-            let rgb_pixel = image.get_pixel(x, y);
-            let mask_x = (x * mask_width / width).min(mask_width - 1);
-            let mask_y = (y * mask_height / height).min(mask_height - 1);
-            let alpha = mask.get_pixel(mask_x, mask_y)[0];
-            *pixel = image::Rgba([rgb_pixel[0], rgb_pixel[1], rgb_pixel[2], alpha]);
-        }
-
-        Ok(result)
+        
+        // Strategy 1: Direct buffer manipulation for maximum speed
+        Self::apply_mask_direct_buffer_simd(image, mask, width, height, mask_width, mask_height)
     }
     
+    /// Ultra-fast mask application using direct buffer access and SIMD-friendly operations
+    fn apply_mask_direct_buffer_simd(
+        image: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+        mask: &ImageBuffer<image::Luma<u8>, Vec<u8>>,
+        width: u32,
+        height: u32,
+        mask_width: u32,
+        mask_height: u32,
+    ) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+        let width_usize = width as usize;
+        let height_usize = height as usize;
+        let mask_width_usize = mask_width as usize;
+        let mask_height_usize = mask_height as usize;
+        
+        // Pre-allocate result buffer with exact capacity
+        let mut result_data = Vec::with_capacity(width_usize * height_usize * 4);
+        
+        // Get raw data slices for maximum performance
+        let image_data = image.as_raw();
+        let mask_data = mask.as_raw();
+        
+        // Pre-calculate scaling factors to avoid repeated division
+        let x_scale = mask_width_usize as f32 / width as f32;
+        let y_scale = mask_height_usize as f32 / height as f32;
+        
+        // Strategy 2: Row-by-row processing with cache-friendly access patterns
+        for y in 0..height_usize {
+            // Calculate mask Y coordinate once per row
+            let mask_y = ((y as f32 * y_scale) as usize).min(mask_height_usize - 1);
+            let mask_row_offset = mask_y * mask_width_usize;
+            
+            // Process entire row in chunks for better cache locality
+            for x in 0..width_usize {
+                let image_idx = (y * width_usize + x) * 3;
+                
+                // Calculate mask X coordinate with pre-computed scale
+                let mask_x = ((x as f32 * x_scale) as usize).min(mask_width_usize - 1);
+                let alpha = mask_data[mask_row_offset + mask_x];
+                
+                // Direct buffer write (SIMD-friendly when compiler optimizes)
+                result_data.push(image_data[image_idx]);     // R
+                result_data.push(image_data[image_idx + 1]); // G  
+                result_data.push(image_data[image_idx + 2]); // B
+                result_data.push(alpha);                     // A
+            }
+        }
+        
+        // Create ImageBuffer from raw data (zero-copy)
+        ImageBuffer::from_raw(width, height, result_data)
+            .ok_or_else(|| anyhow::anyhow!("Failed to create result image buffer"))
+    }
+    
+    /// Extremely fast mask application using unsafe direct memory access (when safety allows)
+    #[allow(dead_code)]
+    fn apply_mask_unsafe_simd(
+        image: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+        mask: &ImageBuffer<image::Luma<u8>, Vec<u8>>,
+        width: u32,
+        height: u32,
+        mask_width: u32,
+        mask_height: u32,
+    ) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+        let width_usize = width as usize;
+        let height_usize = height as usize;
+        let total_pixels = width_usize * height_usize;
+        
+        // Pre-allocate with uninitialized memory for maximum speed
+        let mut result_data = Vec::with_capacity(total_pixels * 4);
+        unsafe { result_data.set_len(total_pixels * 4); }
+        
+        let image_data = image.as_raw();
+        let mask_data = mask.as_raw();
+        
+        // Pre-calculate all mask coordinates (memory vs computation tradeoff)
+        let x_scale = mask_width as f32 / width as f32;
+        let y_scale = mask_height as f32 / height as f32;
+        
+        // Vectorized processing in chunks of 4 pixels (SIMD-friendly)
+        let chunk_size = 4;
+        let full_chunks = total_pixels / chunk_size;
+        
+        for chunk_idx in 0..full_chunks {
+            let base_pixel = chunk_idx * chunk_size;
+            
+            for i in 0..chunk_size {
+                let pixel_idx = base_pixel + i;
+                let y = pixel_idx / width_usize;
+                let x = pixel_idx % width_usize;
+                
+                let mask_x = ((x as f32 * x_scale) as usize).min(mask_width as usize - 1);
+                let mask_y = ((y as f32 * y_scale) as usize).min(mask_height as usize - 1);
+                let alpha = mask_data[mask_y * mask_width as usize + mask_x];
+                
+                let src_idx = pixel_idx * 3;
+                let dst_idx = pixel_idx * 4;
+                
+                unsafe {
+                    *result_data.get_unchecked_mut(dst_idx) = *image_data.get_unchecked(src_idx);
+                    *result_data.get_unchecked_mut(dst_idx + 1) = *image_data.get_unchecked(src_idx + 1);
+                    *result_data.get_unchecked_mut(dst_idx + 2) = *image_data.get_unchecked(src_idx + 2);
+                    *result_data.get_unchecked_mut(dst_idx + 3) = alpha;
+                }
+            }
+        }
+        
+        // Handle remaining pixels (if total_pixels not divisible by chunk_size)
+        for pixel_idx in (full_chunks * chunk_size)..total_pixels {
+            let y = pixel_idx / width_usize;
+            let x = pixel_idx % width_usize;
+            
+            let mask_x = ((x as f32 * x_scale) as usize).min(mask_width as usize - 1);
+            let mask_y = ((y as f32 * y_scale) as usize).min(mask_height as usize - 1);
+            let alpha = mask_data[mask_y * mask_width as usize + mask_x];
+            
+            let src_idx = pixel_idx * 3;
+            let dst_idx = pixel_idx * 4;
+            
+            unsafe {
+                *result_data.get_unchecked_mut(dst_idx) = *image_data.get_unchecked(src_idx);
+                *result_data.get_unchecked_mut(dst_idx + 1) = *image_data.get_unchecked(src_idx + 1);
+                *result_data.get_unchecked_mut(dst_idx + 2) = *image_data.get_unchecked(src_idx + 2);
+                *result_data.get_unchecked_mut(dst_idx + 3) = alpha;
+            }
+        }
+        
+        ImageBuffer::from_raw(width, height, result_data)
+            .ok_or_else(|| anyhow::anyhow!("Failed to create result image buffer"))
+    }
     
     fn create_cpu_session(model_path: &Path) -> Result<Session> {
         Session::builder()?
