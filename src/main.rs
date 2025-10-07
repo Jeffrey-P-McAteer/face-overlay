@@ -44,6 +44,9 @@ async fn main() -> Result<()> {
     args.setup_logging();
 
     info!("Starting face-overlay application");
+    if args.flip {
+        info!("Camera input will be flipped horizontally (mirror effect)");
+    }
 
     let result = run_application(args).await;
 
@@ -70,7 +73,7 @@ async fn run_application(args: Args) -> Result<()> {
 
     let anchor_position: AnchorPosition = args.anchor.into();
     let (overlay_width, overlay_height) = {
-        let webcam = WebcamCapture::new(Some(&args.device), args.width, args.height)
+        let webcam = WebcamCapture::new(Some(&args.device), args.width, args.height, args.flip)
             .context("Failed to initialize webcam")?; // Camera briefly open+closed
         webcam.resolution()
     };
@@ -99,7 +102,7 @@ async fn run_application(args: Args) -> Result<()> {
     // Spawn an infinite loop which reads frames from the camera and pushed them into the channel
     let webcam_thread_cancel_bool = thread_cancel_bool.clone();
     let webcam_task: tokio::task::JoinHandle<Result<(), anyhow::Error>> = tokio::spawn(async move {
-        let mut webcam = WebcamCapture::new(Some(&args.device), args.width, args.height)
+        let mut webcam = WebcamCapture::new(Some(&args.device), args.width, args.height, args.flip)
             .context("Failed to initialize webcam")?;
         let mut allowed_errors = 10;
         while allowed_errors > 0 && !webcam_thread_cancel_bool.load(std::sync::atomic::Ordering::Relaxed) {

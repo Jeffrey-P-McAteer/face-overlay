@@ -16,10 +16,11 @@ pub struct WebcamCapture {
     target_height: u32,
     frame_count: u32,
     simulated: bool,
+    flip_horizontal: bool,
 }
 
 impl WebcamCapture {
-    pub fn new(device_path: Option<&str>, target_width: u32, target_height: u32) -> Result<Self> {
+    pub fn new(device_path: Option<&str>, target_width: u32, target_height: u32, flip_horizontal: bool) -> Result<Self> {
         let device = device_path.unwrap_or("/dev/video0");
         
         // Try to create real camera first
@@ -34,6 +35,7 @@ impl WebcamCapture {
                     target_height,
                     frame_count: 0,
                     simulated: false,
+                    flip_horizontal,
                 })
             }
             Err(e) => {
@@ -47,6 +49,7 @@ impl WebcamCapture {
                     target_height,
                     frame_count: 0,
                     simulated: true,
+                    flip_horizontal,
                 })
             }
         }
@@ -98,10 +101,18 @@ impl WebcamCapture {
             self.generate_simulated_frame()
         };
 
+        // Apply horizontal flip if requested
+        let processed_frame = if self.flip_horizontal {
+            debug!("Applying horizontal flip to frame {}", self.frame_count);
+            image::imageops::flip_horizontal(&raw_frame)
+        } else {
+            raw_frame
+        };
+
         // Scale frame to target dimensions if needed
         if (self.width, self.height) != (self.target_width, self.target_height) {
             let scaled_frame = image::imageops::resize(
-                &raw_frame,
+                &processed_frame,
                 self.target_width,
                 self.target_height,
                 image::imageops::FilterType::Nearest, // Fastest resize
@@ -109,7 +120,7 @@ impl WebcamCapture {
             debug!("Scaled frame from {}x{} to {}x{}", self.width, self.height, self.target_width, self.target_height);
             Ok(scaled_frame)
         } else {
-            Ok(raw_frame)
+            Ok(processed_frame)
         }
     }
 

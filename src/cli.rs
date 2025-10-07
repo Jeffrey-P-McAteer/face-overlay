@@ -80,6 +80,12 @@ pub struct Args {
     )]
     pub ai_model: String,
 
+    #[arg(
+        long = "flip",
+        help = "Flip the camera input horizontally (mirror effect)"
+    )]
+    pub flip: bool,
+
     // Removed ai_inference_interval - AI now runs on EVERY frame for maximum responsiveness
     // Removed mask_cache_size - no more inefficient caching system
 
