@@ -245,7 +245,9 @@ impl SegmentationModel {
     fn create_cpu_session(model_path: &Path) -> Result<Session> {
         Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(num_cpus::get())?
+            .with_intra_threads(num_cpus::get() / 2)?
+            .with_inter_threads(num_cpus::get() / 2)?
+            .with_parallel_execution(true)?
             .commit_from_file(model_path)
             .context("Failed to load ONNX model")
     }
