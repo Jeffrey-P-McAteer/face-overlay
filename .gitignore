@@ -1,4 +1,9 @@
 
+perf.data
+perf.data.old
+perf.data*
+flamegraph.svg
+models
 
 # Added by cargo
 
