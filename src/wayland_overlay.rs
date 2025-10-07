@@ -60,9 +60,11 @@ pub struct WaylandOverlay {
     mouse_tracker: MouseTracker,
     mouse_detection_margin: i32,
     
-    // File descriptor tracking for resource management
+    // Optimized persistent SHM resource management
     current_shm_fd: Option<i32>,
     current_buffer_size: u32,
+    persistent_memory_map: Option<*mut u8>,  // Keep memory mapped across frames
+    max_buffer_size: u32,  // Track largest buffer size allocated
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +133,8 @@ impl WaylandOverlay {
             mouse_detection_margin: 25, // Move when mouse is within 50 pixels
             current_shm_fd: None,
             current_buffer_size: 0,
+            persistent_memory_map: None,
+            max_buffer_size: 0,
         };
 
         Ok((overlay, conn, event_queue))
@@ -190,15 +194,15 @@ impl WaylandOverlay {
         let stride = img_width * 4; // 4 bytes per pixel (ARGB)
         let buffer_size = stride * img_height;
         
-        // Check if we need to recreate SHM pool (size change or first time)
+        // Only recreate SHM pool if buffer size actually increased beyond current capacity
         let need_new_pool = self.pool.is_none() || 
             img_width != self.width || 
             img_height != self.height ||
-            buffer_size != self.current_buffer_size;
+            buffer_size > self.max_buffer_size;
         
         if need_new_pool {
             debug!("Recreating SHM pool: size changed from {}x{} ({} bytes) to {}x{} ({} bytes)", 
-                   self.width, self.height, self.current_buffer_size, 
+                   self.width, self.height, self.max_buffer_size, 
                    img_width, img_height, buffer_size);
             
             // Clean up existing resources first
@@ -214,17 +218,45 @@ impl WaylandOverlay {
                 debug!("Layer surface size changed to {}x{}", self.width, self.height);
             }
             
-            // Create new shared memory buffer
-            let shm_fd = self.create_shm_fd(buffer_size as usize)?;
+            // Calculate expanded buffer size with 25% headroom to reduce future recreations
+            let expanded_buffer_size = ((buffer_size as f32) * 1.25) as u32;
+            
+            // Create new shared memory buffer with expanded size
+            let shm_fd = self.create_shm_fd(expanded_buffer_size as usize)?;
+            
+            // Create persistent memory mapping for the entire buffer
+            let memory_ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    expanded_buffer_size as usize,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_SHARED,
+                    shm_fd,
+                    0,
+                )
+            };
+            
+            if memory_ptr == libc::MAP_FAILED {
+                unsafe { libc::close(shm_fd); }
+                anyhow::bail!("Failed to create persistent memory mapping for SHM");
+            }
             
             // Create Wayland SHM pool
             use std::os::fd::BorrowedFd;
             let borrowed_fd = unsafe { BorrowedFd::borrow_raw(shm_fd) };
-            let pool = self.shm.create_pool(borrowed_fd, buffer_size as i32, qh, ());
+            let pool = self.shm.create_pool(borrowed_fd, expanded_buffer_size as i32, qh, ());
             
             // Store new resources
             self.pool = Some(pool);
             self.current_shm_fd = Some(shm_fd);
+            self.current_buffer_size = buffer_size;
+            self.max_buffer_size = expanded_buffer_size;
+            self.persistent_memory_map = Some(memory_ptr as *mut u8);
+            
+            info!("Created persistent SHM pool: {}x{} ({} bytes allocated, {} bytes headroom)", 
+                  img_width, img_height, buffer_size, expanded_buffer_size - buffer_size);
+        } else {
+            // Just update current frame size for existing pool
             self.current_buffer_size = buffer_size;
         }
         
@@ -240,11 +272,11 @@ impl WaylandOverlay {
             (),
         );
         
-        // Write pixel data to shared memory (reuse existing FD)
-        if let Some(shm_fd) = self.current_shm_fd {
-            self.write_pixels_to_shm(image, shm_fd, buffer_size as usize)?;
+        // Write pixel data to persistent memory mapping (no mmap/munmap overhead)
+        if let Some(memory_ptr) = self.persistent_memory_map {
+            self.write_pixels_to_persistent_memory(image, memory_ptr, buffer_size as usize)?;
         } else {
-            anyhow::bail!("No shared memory file descriptor available");
+            anyhow::bail!("No persistent memory mapping available");
         }
         
         // Attach buffer and commit (get layer_surface reference here)
@@ -263,15 +295,24 @@ impl WaylandOverlay {
         // Store new buffer
         self.buffer = Some(buffer);
         
-        debug!("Frame updated: {}x{} with {} SHM pool", 
+        debug!("Frame updated: {}x{} with {} SHM pool (persistent mapping: {})", 
                self.width, self.height,
-               if need_new_pool { "new" } else { "reused" });
+               if need_new_pool { "new" } else { "reused" },
+               if self.persistent_memory_map.is_some() { "active" } else { "inactive" });
         
         Ok(())
     }
 
     /// Clean up shared memory resources to prevent file descriptor leaks
     fn cleanup_shm_resources(&mut self) {
+        // Unmap persistent memory mapping first
+        if let Some(memory_ptr) = self.persistent_memory_map.take() {
+            unsafe {
+                libc::munmap(memory_ptr as *mut libc::c_void, self.max_buffer_size as usize);
+            }
+            debug!("Unmapped persistent memory mapping ({} bytes)", self.max_buffer_size);
+        }
+        
         // Close current file descriptor if exists
         if let Some(fd) = self.current_shm_fd.take() {
             unsafe {
@@ -289,6 +330,7 @@ impl WaylandOverlay {
         }
         
         self.current_buffer_size = 0;
+        self.max_buffer_size = 0;
     }
 
     fn create_shm_fd(&self, size: usize) -> Result<i32> {
@@ -343,6 +385,46 @@ impl WaylandOverlay {
         Ok(fd)
     }
     
+    /// Optimized pixel writing to persistent memory mapping (no mmap/munmap overhead)
+    fn write_pixels_to_persistent_memory(&self, image: &ImageBuffer<Rgba<u8>, Vec<u8>>, memory_ptr: *mut u8, size: usize) -> Result<()> {
+        let (img_width, img_height) = image.dimensions();
+        let buffer = unsafe { std::slice::from_raw_parts_mut(memory_ptr, size) };
+        let image_data = image.as_raw();
+        
+        // Optimized pixel conversion with direct memory access and SIMD-friendly loops
+        let total_pixels = (img_width * img_height) as usize;
+        
+        // Process pixels in chunks for better cache performance
+        for pixel_idx in 0..total_pixels {
+            let src_offset = pixel_idx * 4;  // RGBA source
+            let dst_offset = pixel_idx * 4;  // ARGB destination
+            
+            if dst_offset + 3 < size && src_offset + 3 < image_data.len() {
+                // Extract RGBA values (branchless for better performance)
+                let r = image_data[src_offset] as u32;
+                let g = image_data[src_offset + 1] as u32;
+                let b = image_data[src_offset + 2] as u32;
+                let a = image_data[src_offset + 3] as u32;
+                
+                // Optimized premultiplication (avoid division where possible)
+                let premul_r = ((r * a + 128) >> 8) as u8;  // Fast approximation of r * a / 255
+                let premul_g = ((g * a + 128) >> 8) as u8;
+                let premul_b = ((b * a + 128) >> 8) as u8;
+                
+                // Write in ARGB format (little-endian: BGRA in memory)
+                unsafe {
+                    *buffer.get_unchecked_mut(dst_offset) = premul_b;     // Blue
+                    *buffer.get_unchecked_mut(dst_offset + 1) = premul_g; // Green
+                    *buffer.get_unchecked_mut(dst_offset + 2) = premul_r; // Red
+                    *buffer.get_unchecked_mut(dst_offset + 3) = a as u8;  // Alpha
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Legacy method kept for fallback compatibility  
     fn write_pixels_to_shm(&self, image: &ImageBuffer<Rgba<u8>, Vec<u8>>, fd: i32, size: usize) -> Result<()> {
         use std::ptr;
         
@@ -362,43 +444,15 @@ impl WaylandOverlay {
             anyhow::bail!("Failed to mmap SHM file");
         }
         
-        // Write pixel data
-        let (img_width, img_height) = image.dimensions();
-        let buffer = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, size) };
-        
-        for y in 0..img_height {
-            for x in 0..img_width {
-                let pixel = image.get_pixel(x, y);
-                let offset = ((y * img_width + x) * 4) as usize;
-                
-                if offset + 3 < size {
-                    // Convert RGBA to ARGB format (Wayland's preferred format)
-                    // With premultiplied alpha for correct blending
-                    let r = pixel[0] as u32;
-                    let g = pixel[1] as u32;
-                    let b = pixel[2] as u32;
-                    let a = pixel[3] as u32;
-                    
-                    // Premultiply RGB values by alpha
-                    let premul_r = if a > 0 { (r * a / 255) as u8 } else { 0 };
-                    let premul_g = if a > 0 { (g * a / 255) as u8 } else { 0 };
-                    let premul_b = if a > 0 { (b * a / 255) as u8 } else { 0 };
-                    
-                    // Write in ARGB format (little-endian: BGRA in memory)
-                    buffer[offset] = premul_b;     // Blue
-                    buffer[offset + 1] = premul_g; // Green
-                    buffer[offset + 2] = premul_r; // Red
-                    buffer[offset + 3] = a as u8;  // Alpha
-                }
-            }
-        }
+        // Use optimized writing method
+        let result = self.write_pixels_to_persistent_memory(image, ptr as *mut u8, size);
         
         // Unmap memory
         unsafe {
             libc::munmap(ptr, size);
         }
         
-        Ok(())
+        result
     }
 
     pub fn set_anchor_position(&mut self, position: AnchorPosition, _qh: &QueueHandle<Self>) {
@@ -524,6 +578,30 @@ impl WaylandOverlay {
             }
         }
     }
+    
+    /// Get SHM performance statistics
+    pub fn get_shm_stats(&self) -> ShmStats {
+        ShmStats {
+            persistent_mapping_active: self.persistent_memory_map.is_some(),
+            current_buffer_size: self.current_buffer_size,
+            max_buffer_size: self.max_buffer_size,
+            buffer_utilization: if self.max_buffer_size > 0 {
+                (self.current_buffer_size as f32 / self.max_buffer_size as f32 * 100.0) as u8
+            } else {
+                0
+            },
+            has_file_descriptor: self.current_shm_fd.is_some(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ShmStats {
+    pub persistent_mapping_active: bool,
+    pub current_buffer_size: u32,
+    pub max_buffer_size: u32,
+    pub buffer_utilization: u8, // Percentage of max buffer being used
+    pub has_file_descriptor: bool,
 }
 
 impl Drop for WaylandOverlay {

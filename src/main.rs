@@ -220,7 +220,11 @@ async fn run_application(args: Args) -> Result<()> {
                     0.0
                 };
 
-                info!("FPS: {:.1} (rolling avg of last {} frames)", rolling_fps, frame_times.len());
+                let shm_stats = overlay.get_shm_stats();
+                info!("FPS: {:.1} (rolling avg of last {} frames) | SHM: {} mapping, {}% buffer utilization", 
+                      rolling_fps, frame_times.len(),
+                      if shm_stats.persistent_mapping_active { "persistent" } else { "standard" },
+                      shm_stats.buffer_utilization);
                 last_fps_report = now;
             }
 
