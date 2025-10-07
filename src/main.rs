@@ -178,6 +178,7 @@ async fn run_application(args: Args) -> Result<()> {
                 // Slice image and update meta-data for slice_task
 
                 let resized_image = image::imageops::resize(&frame, segmentation_model.input_width as u32, segmentation_model.input_height as u32, image::imageops::FilterType::Nearest);
+
                 let mask = segmentation_model.run_efficient_ai_inference(&resized_image)?;
 
                 // send slice data; this is async to the entire imaging pipeline, be

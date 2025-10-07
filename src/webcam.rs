@@ -104,7 +104,7 @@ impl WebcamCapture {
                 &raw_frame,
                 self.target_width,
                 self.target_height,
-                image::imageops::FilterType::Lanczos3,
+                image::imageops::FilterType::Nearest, // Fastest resize
             );
             debug!("Scaled frame from {}x{} to {}x{}", self.width, self.height, self.target_width, self.target_height);
             Ok(scaled_frame)
