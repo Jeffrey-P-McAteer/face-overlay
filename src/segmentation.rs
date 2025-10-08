@@ -1,3 +1,4 @@
+use tracing::warn;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use image::{ImageBuffer, Rgb, Rgba};
@@ -60,7 +61,17 @@ impl SegmentationModel {
             anyhow::bail!("Model file does not exist at path: {:?}", model_path);
         }
         
-        let session = Self::create_cpu_session(model_path)?;
+        let session = match Self::create_gpu_session(model_path) {
+            Ok(gpu_session) => {
+                warn!("Successfully loaded GPU ONNX Session!");
+                gpu_session
+            }
+            Err(e) => {
+                //std::thread::sleep(std::time::Duration::from_millis(150));
+                warn!("Could not load GPU ONNX Session, falling back to CPU: {:?}", e);
+                Self::create_cpu_session(model_path)?
+            }
+        };
         let (input_width, input_height) = model_type.input_size();
         let buffer_size = 3 * input_height * input_width;
 
@@ -242,6 +253,22 @@ impl SegmentationModel {
             .ok_or_else(|| anyhow::anyhow!("Failed to create result image buffer"))
     }
     
+    fn create_gpu_session(model_path: &Path) -> Result<Session> {
+        let providers = [
+            ort::execution_providers::cuda::CUDAExecutionProvider::default().build(),
+            ort::execution_providers::tensorrt::TensorRTExecutionProvider::default().build(),
+            ort::execution_providers::rocm::ROCmExecutionProvider::default().build(),
+        ];
+        Session::builder()?
+            .with_execution_providers(providers)?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(num_cpus::get() / 2)?
+            .with_inter_threads(num_cpus::get() / 2)?
+            .with_parallel_execution(true)?
+            .commit_from_file(model_path)
+            .context("Failed to load ONNX model")
+    }
+
     fn create_cpu_session(model_path: &Path) -> Result<Session> {
         Session::builder()?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
