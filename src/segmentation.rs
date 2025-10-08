@@ -373,7 +373,7 @@ impl SegmentationModel {
         // Threshold the blurred mask to create erosion effect
         // Pixels that were partially transparent after blur become fully transparent
         //let threshold = 255 - (erosion_pixels as u32 * 40).min(200) as u8; // Adaptive threshold
-        let threshold = 210;
+        let threshold = 200;
 
         let mut eroded_data = Vec::with_capacity(width_usize * height_usize);
         for &pixel in blurred.as_raw() {
