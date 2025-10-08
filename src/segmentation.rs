@@ -256,8 +256,9 @@ impl SegmentationModel {
     fn create_gpu_session(model_path: &Path) -> Result<Session> {
         let providers = [
             ort::execution_providers::cuda::CUDAExecutionProvider::default().build(),
-            ort::execution_providers::tensorrt::TensorRTExecutionProvider::default().build(),
-            ort::execution_providers::rocm::ROCmExecutionProvider::default().build(),
+            //ort::execution_providers::tensorrt::TensorRTExecutionProvider::default().build(),
+            //ort::execution_providers::rocm::ROCmExecutionProvider::default().build(),
+            // TODO turn on/off enabled things later; for now we know our HW is nvidia
         ];
         Session::builder()?
             .with_execution_providers(providers)?
@@ -347,6 +348,117 @@ impl SegmentationModel {
             .context("Failed to create mask image")
     }
     
+    /// Erode (clip inwards) a mask using Gaussian blur + threshold approach
+    /// This creates smooth, natural-looking erosion while maintaining performance
+    pub fn erode_mask(mask: &ImageBuffer<image::Luma<u8>, Vec<u8>>, erosion_pixels: u8) -> Result<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
+        if erosion_pixels == 0 {
+            return Ok(mask.clone());
+        }
+
+        let (width, height) = mask.dimensions();
+        let width_usize = width as usize;
+        let height_usize = height as usize;
+
+        // Convert erosion pixels to sigma for Gaussian blur
+        // Higher sigma = more blur = more erosion
+        let sigma = (erosion_pixels as f32) * 0.8;
+
+        // Create Gaussian kernel
+        let kernel_size = (erosion_pixels as i32 * 2 + 1).max(5) as usize;
+        let kernel = Self::create_gaussian_kernel(kernel_size, sigma);
+
+        // Apply Gaussian blur
+        let blurred = Self::apply_gaussian_blur(mask, &kernel, kernel_size)?;
+
+        // Threshold the blurred mask to create erosion effect
+        // Pixels that were partially transparent after blur become fully transparent
+        //let threshold = 255 - (erosion_pixels as u32 * 40).min(200) as u8; // Adaptive threshold
+        let threshold = 210;
+
+        let mut eroded_data = Vec::with_capacity(width_usize * height_usize);
+        for &pixel in blurred.as_raw() {
+            eroded_data.push(if pixel >= threshold { pixel } else { 0 });
+        }
+
+        ImageBuffer::from_raw(width, height, eroded_data)
+            .context("Failed to create eroded mask")
+    }
+
+    /// Create a Gaussian kernel for blur operations
+    fn create_gaussian_kernel(size: usize, sigma: f32) -> Vec<f32> {
+        let mut kernel = Vec::with_capacity(size * size);
+        let center = (size / 2) as i32;
+        let sigma_sq = sigma * sigma;
+        let two_sigma_sq = 2.0 * sigma_sq;
+        let inv_sqrt_two_pi_sigma = 1.0 / (sigma * (2.0 * std::f32::consts::PI).sqrt());
+
+        for y in 0..size {
+            for x in 0..size {
+                let dx = (x as i32 - center) as f32;
+                let dy = (y as i32 - center) as f32;
+                let distance_sq = dx * dx + dy * dy;
+                let value = inv_sqrt_two_pi_sigma * (-distance_sq / two_sigma_sq).exp();
+                kernel.push(value);
+            }
+        }
+
+        // Normalize kernel
+        let sum: f32 = kernel.iter().sum();
+        if sum > 0.0 {
+            for value in &mut kernel {
+                *value /= sum;
+            }
+        }
+
+        kernel
+    }
+
+    /// Apply Gaussian blur to a mask using the given kernel
+    fn apply_gaussian_blur(
+        mask: &ImageBuffer<image::Luma<u8>, Vec<u8>>,
+        kernel: &[f32],
+        kernel_size: usize,
+    ) -> Result<ImageBuffer<image::Luma<u8>, Vec<u8>>> {
+        let (width, height) = mask.dimensions();
+        let width_usize = width as usize;
+        let height_usize = height as usize;
+        let kernel_center = (kernel_size / 2) as i32;
+
+        let mut result_data = Vec::with_capacity(width_usize * height_usize);
+
+        for y in 0..height_usize {
+            for x in 0..width_usize {
+                let mut sum = 0.0f32;
+                let mut weight_sum = 0.0f32;
+
+                for ky in 0..kernel_size {
+                    for kx in 0..kernel_size {
+                        let sample_x = x as i32 + kx as i32 - kernel_center;
+                        let sample_y = y as i32 + ky as i32 - kernel_center;
+
+                        if sample_x >= 0 && sample_x < width as i32 && sample_y >= 0 && sample_y < height as i32 {
+                            let mask_value = mask.get_pixel(sample_x as u32, sample_y as u32)[0] as f32;
+                            let kernel_value = kernel[ky * kernel_size + kx];
+                            sum += mask_value * kernel_value;
+                            weight_sum += kernel_value;
+                        }
+                    }
+                }
+
+                let blurred_value = if weight_sum > 0.0 {
+                    (sum / weight_sum).round() as u8
+                } else {
+                    0
+                };
+
+                result_data.push(blurred_value);
+            }
+        }
+
+        ImageBuffer::from_raw(width, height, result_data)
+            .context("Failed to create blurred mask")
+    }
+
 }
 
 pub async fn download_model_if_needed(hf_token: Option<String>, disable_download: bool, model_type: Option<ModelType>) -> Result<std::path::PathBuf> {

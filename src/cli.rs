@@ -86,6 +86,13 @@ pub struct Args {
     )]
     pub flip: bool,
 
+    #[arg(
+        long = "mask-erosion",
+        default_value = "0",
+        help = "Erode (clip inwards) the AI mask by this many pixels (0-5)"
+    )]
+    pub mask_erosion: u8,
+
     // Removed ai_inference_interval - AI now runs on EVERY frame for maximum responsiveness
     // Removed mask_cache_size - no more inefficient caching system
 

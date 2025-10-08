@@ -127,6 +127,7 @@ fn spawn_ai_mask_generation_task(
     mut rx_camera_frame: tokio::sync::watch::Receiver<Option<ImageBuffer<Rgb<u8>, Vec<u8>>>>,
     segmentation_model: Option<SegmentationModel>,
     tx_ai_mask_data: tokio::sync::watch::Sender<Option<ImageBuffer<image::Luma<u8>, Vec<u8>>>>,
+    mask_erosion: u8,
     cancel_bool: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {
     tokio::spawn(async move {
@@ -140,7 +141,12 @@ fn spawn_ai_mask_generation_task(
                 // Slice image and update meta-data for slice_task
                 let resized_image = image::imageops::resize(&frame, segmentation_model.input_width as u32, segmentation_model.input_height as u32, image::imageops::FilterType::Nearest);
 
-                let mask = segmentation_model.run_efficient_ai_inference(&resized_image)?;
+                let mut mask = segmentation_model.run_efficient_ai_inference(&resized_image)?;
+                
+                // Apply mask erosion if requested
+                if mask_erosion > 0 {
+                    mask = SegmentationModel::erode_mask(&mask, mask_erosion)?;
+                }
 
                 // send slice data; this is async to the entire imaging pipeline
                 if let Err(e) = tx_ai_mask_data.send(Some(mask)) {
@@ -225,6 +231,7 @@ async fn run_application(args: Args) -> Result<()> {
         ai_mask_rx_camera_frame,
         segmentation_model,
         tx_ai_mask_data,
+        args.mask_erosion,
         ai_mask_thread_cancel_bool,
     );
 
