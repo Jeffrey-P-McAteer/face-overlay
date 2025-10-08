@@ -6,12 +6,16 @@ mod webcam;
 mod segmentation;
 mod wayland_overlay;
 mod mouse_tracker;
+mod background_model;
+mod optical_flow;
+mod hybrid_segmentation;
 
 use image::Rgb;
 use anyhow::{Context, Result};
 use cli::Args;
 use image::ImageBuffer;
 use segmentation::{download_model_if_needed, read_hf_token_from_file, SegmentationModel, ModelType};
+use hybrid_segmentation::HybridSegmentationPipeline;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{error, info};
@@ -130,23 +134,50 @@ fn spawn_ai_mask_generation_task(
     cancel_bool: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {
     tokio::spawn(async move {
-        let mut segmentation_model = segmentation_model.expect("We have no segmentation_model!");
+        // Initialize hybrid segmentation pipeline
+        let mut hybrid_pipeline = if let Some(frame) = (*rx_camera_frame.borrow()).clone() {
+            let (width, height) = frame.dimensions();
+            HybridSegmentationPipeline::new(segmentation_model, width, height)
+        } else {
+            // Default dimensions if no frame available yet
+            HybridSegmentationPipeline::new(segmentation_model, 640, 480)
+        };
+
         let mut allowed_errors = 10;
+        let mut stats_report_interval = 0u32;
+        
         while allowed_errors > 0 && !cancel_bool.load(std::sync::atomic::Ordering::Relaxed) {
             // Grab the latest from the webcam
             let frame_value = (*rx_camera_frame.borrow()).clone();
             rx_camera_frame.mark_unchanged(); // Say we have observed the current value
+            
             if let Some(frame) = frame_value {
-                // Slice image and update meta-data for slice_task
-                let resized_image = image::imageops::resize(&frame, segmentation_model.input_width as u32, segmentation_model.input_height as u32, image::imageops::FilterType::Nearest);
+                // Process frame through hybrid pipeline
+                match hybrid_pipeline.process_frame(&frame) {
+                    Ok(mask) => {
+                        // Send the hybrid-generated mask
+                        if let Err(e) = tx_ai_mask_data.send(Some(mask)) {
+                           eprintln!("[ tx_ai_mask_data.send ] {:?}", e);
+                        }
 
-                let mask = segmentation_model.run_efficient_ai_inference(&resized_image)?;
-
-                // send slice data; this is async to the entire imaging pipeline
-                if let Err(e) = tx_ai_mask_data.send(Some(mask)) {
-                   eprintln!("[ tx_ai_mask_data.send ] {:?}", e);
+                        // Report statistics every 120 frames (4 seconds at 30fps)
+                        stats_report_interval += 1;
+                        if stats_report_interval >= 120 {
+                            let stats = hybrid_pipeline.get_statistics();
+                            info!("Hybrid segmentation stats: frame {} | AI last used at frame {} | Learning: {} | Has AI: {}", 
+                                  stats.frame_count, stats.last_ai_frame, stats.is_learning, stats.has_ai_model);
+                            stats_report_interval = 0;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Hybrid segmentation error: {:?}", e);
+                        allowed_errors -= 1;
+                    }
                 }
             }
+
+            // Small delay to prevent busy-waiting
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
         Ok(())
     })
@@ -163,7 +194,13 @@ async fn run_application(args: Args) -> Result<()> {
             .await.unwrap_or_default()
     };
 
-    let mut segmentation_model = load_model(&model_path, args.get_ai_model_type());
+    let segmentation_model = load_model(&model_path, args.get_ai_model_type());
+    
+    if segmentation_model.is_some() {
+        info!("AI segmentation model loaded successfully - using hybrid AI + traditional approach");
+    } else {
+        info!("No AI segmentation model available - using traditional background modeling only");
+    }
 
     let anchor_position: AnchorPosition = args.anchor.into();
     let (overlay_width, overlay_height) = {
