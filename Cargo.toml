@@ -19,7 +19,7 @@ rocm = []
 nokhwa = { version = "0.10", features = ["input-v4l"] }
 
 # AI/ML inference with GPU acceleration
-ort = { version = "2.0.0-rc.10", features = ["copy-dylibs", "cuda", "tensorrt", "rocm"] }
+ort = { version = "2.0.0-rc.10", features = ["copy-dylibs", "cuda", "tensorrt", "rocm", "download-binaries"] }
 ndarray = "0.15"
 num_cpus = "1.16"
 
