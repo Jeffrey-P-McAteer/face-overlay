@@ -93,6 +93,20 @@ pub struct Args {
     )]
     pub mask_erosion: u8,
 
+    #[arg(
+        long = "border-width",
+        default_value = "0",
+        help = "Width of the border outline around visible pixels (0 = no border)"
+    )]
+    pub border_width: u32,
+
+    #[arg(
+        long = "border-color",
+        default_value = "#ffffff",
+        help = "Color of the border outline in #RRGGBB format"
+    )]
+    pub border_color: String,
+
     // Removed ai_inference_interval - AI now runs on EVERY frame for maximum responsiveness
     // Removed mask_cache_size - no more inefficient caching system
 
@@ -146,6 +160,22 @@ impl Args {
                 default_path
             }
         }
+    }
+
+    pub fn get_border_color(&self) -> [u8; 3] {
+        if let Some(hex_str) = self.border_color.strip_prefix('#') {
+            if hex_str.len() == 6 {
+                if let Ok(r) = u8::from_str_radix(&hex_str[0..2], 16) {
+                    if let Ok(g) = u8::from_str_radix(&hex_str[2..4], 16) {
+                        if let Ok(b) = u8::from_str_radix(&hex_str[4..6], 16) {
+                            return [r, g, b];
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("Warning: Invalid border color '{}', defaulting to white", self.border_color);
+        [255, 255, 255]
     }
 
     pub fn setup_logging(&self) {

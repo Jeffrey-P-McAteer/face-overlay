@@ -123,6 +123,145 @@ impl SegmentationModel {
         // Strategy 1: Direct buffer manipulation for maximum speed
         Self::apply_mask_direct_buffer_simd(image, mask, width, height, mask_width, mask_height)
     }
+
+    pub fn apply_mask_with_border(
+        image: &ImageBuffer<Rgb<u8>, Vec<u8>>, 
+        mask: &ImageBuffer<image::Luma<u8>, Vec<u8>>,
+        border_width: u32,
+        border_color: [u8; 3]
+    ) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+        if border_width == 0 {
+            return Self::apply_mask_efficiently_public(image, mask);
+        }
+
+        let (width, height) = image.dimensions();
+        let (mask_width, mask_height) = mask.dimensions();
+        
+        // First apply the mask normally
+        let mut masked_image = Self::apply_mask_direct_buffer_simd(image, mask, width, height, mask_width, mask_height)?;
+        
+        // Add border around visible pixels
+        Self::add_border_outline(&mut masked_image, border_width, border_color)?;
+        
+        Ok(masked_image)
+    }
+
+    fn add_border_outline(
+        image: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+        border_width: u32,
+        border_color: [u8; 3]
+    ) -> Result<()> {
+        let (width, height) = image.dimensions();
+        let width_i32 = width as i32;
+        let height_i32 = height as i32;
+        
+        // Create a copy of the current alpha channel to detect edges
+        let mut alpha_mask = vec![0u8; (width * height) as usize];
+        for (i, pixel) in image.pixels().enumerate() {
+            alpha_mask[i] = pixel[3];
+        }
+        
+        // Create a set to store border pixels for each layer
+        let mut border_layers: Vec<Vec<(i32, i32)>> = Vec::new();
+        
+        // Build thin border layers outward from the edge
+        for layer in 0..border_width {
+            let mut current_layer_pixels = Vec::new();
+            
+            for y in 0..height_i32 {
+                for x in 0..width_i32 {
+                    let current_idx = (y * width_i32 + x) as usize;
+                    let current_alpha = alpha_mask[current_idx];
+                    
+                    // For layer 0: find edge pixels (visible pixels next to transparent ones)
+                    // For layer > 0: find pixels adjacent to previous layer
+                    let should_add = if layer == 0 {
+                        // Edge detection: visible pixel with at least one transparent neighbor
+                        if current_alpha > 0 {
+                            let mut has_transparent_neighbor = false;
+                            // Check only immediate neighbors (8-connectivity)
+                            for dy in -1..=1 {
+                                for dx in -1..=1 {
+                                    if dx == 0 && dy == 0 { continue; }
+                                    let nx = x + dx;
+                                    let ny = y + dy;
+                                    
+                                    if nx >= 0 && nx < width_i32 && ny >= 0 && ny < height_i32 {
+                                        let neighbor_idx = (ny * width_i32 + nx) as usize;
+                                        if alpha_mask[neighbor_idx] == 0 {
+                                            has_transparent_neighbor = true;
+                                            break;
+                                        }
+                                    } else {
+                                        // Edge of image counts as transparent
+                                        has_transparent_neighbor = true;
+                                        break;
+                                    }
+                                }
+                                if has_transparent_neighbor { break; }
+                            }
+                            has_transparent_neighbor
+                        } else {
+                            false
+                        }
+                    } else {
+                        // For subsequent layers: find transparent pixels adjacent to previous layer
+                        if current_alpha == 0 {
+                            let mut adjacent_to_prev_layer = false;
+                            for dy in -1..=1 {
+                                for dx in -1..=1 {
+                                    if dx == 0 && dy == 0 { continue; }
+                                    let nx = x + dx;
+                                    let ny = y + dy;
+                                    
+                                    if nx >= 0 && nx < width_i32 && ny >= 0 && ny < height_i32 {
+                                        // Check if this neighbor is in the previous layer
+                                        if border_layers.len() > 0 {
+                                            let prev_layer = &border_layers[layer as usize - 1];
+                                            if prev_layer.contains(&(nx, ny)) {
+                                                adjacent_to_prev_layer = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                if adjacent_to_prev_layer { break; }
+                            }
+                            adjacent_to_prev_layer
+                        } else {
+                            false
+                        }
+                    };
+                    
+                    if should_add {
+                        current_layer_pixels.push((x, y));
+                    }
+                }
+            }
+            
+            if current_layer_pixels.is_empty() {
+                break; // No more pixels to add
+            }
+            
+            border_layers.push(current_layer_pixels);
+        }
+        
+        // Apply border color to all border layers
+        for layer_pixels in border_layers {
+            for (x, y) in layer_pixels {
+                if x >= 0 && x < width_i32 && y >= 0 && y < height_i32 {
+                    let pixel = image.get_pixel_mut(x as u32, y as u32);
+                    // Apply border color with full opacity
+                    pixel[0] = border_color[0];
+                    pixel[1] = border_color[1]; 
+                    pixel[2] = border_color[2];
+                    pixel[3] = 255;
+                }
+            }
+        }
+        
+        Ok(())
+    }
     
     /// Ultra-fast mask application using direct buffer access and SIMD-friendly operations
     fn apply_mask_direct_buffer_simd(

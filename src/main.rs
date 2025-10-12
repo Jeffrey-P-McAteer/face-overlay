@@ -91,6 +91,8 @@ fn spawn_frame_slicing_task(
     mut rx_camera_frame: tokio::sync::watch::Receiver<Option<ImageBuffer<Rgb<u8>, Vec<u8>>>>,
     mut rx_ai_mask_data: tokio::sync::watch::Receiver<Option<ImageBuffer<image::Luma<u8>, Vec<u8>>>>,
     tx_sliced_frame: tokio::sync::watch::Sender<Option<ImageBuffer<image::Rgba<u8>, Vec<u8>>>>,
+    border_width: u32,
+    border_color: [u8; 3],
     cancel_bool: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {
     tokio::spawn(async move {
@@ -106,7 +108,7 @@ fn spawn_frame_slicing_task(
 
             if let (Some(frame), Some(mask)) = (frame_value, ai_mask) {
                 // Slice it and send to the screen! (this should be FAST)
-                match SegmentationModel::apply_mask_efficiently_public(&frame, &mask) {
+                match SegmentationModel::apply_mask_with_border(&frame, &mask, border_width, border_color) {
                     Ok(frame_a) => {
                         // send
                         if let Err(e) = tx_sliced_frame.send(Some(frame_a)) {
@@ -114,7 +116,7 @@ fn spawn_frame_slicing_task(
                         }
                     }
                     Err(e) => {
-                        error!("[ SegmentationModel::apply_mask_efficiently_public ] {:?}", e);
+                        error!("[ SegmentationModel::apply_mask_with_border ] {:?}", e);
                     }
                 }
             }
@@ -171,7 +173,7 @@ async fn run_application(args: Args) -> Result<()> {
 
     let mut segmentation_model = load_model(&model_path, args.get_ai_model_type());
 
-    let anchor_position: AnchorPosition = args.anchor.into();
+    let anchor_position: AnchorPosition = args.anchor.clone().into();
     let (overlay_width, overlay_height) = {
         let webcam = WebcamCapture::new(Some(&args.device), args.width, args.height, args.flip)
             .context("Failed to initialize webcam")?; // Camera briefly open+closed
@@ -221,6 +223,8 @@ async fn run_application(args: Args) -> Result<()> {
         slicer_rx_camera_frame,
         rx_ai_mask_data.clone(),
         tx_sliced_frame,
+        args.border_width,
+        args.get_border_color(),
         slicer_thread_cancel_bool,
     );
 
