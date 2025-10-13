@@ -5,7 +5,6 @@ mod cli;
 mod webcam;
 mod segmentation;
 mod wayland_overlay;
-mod mouse_tracker;
 
 use image::Rgb;
 use anyhow::{Context, Result};

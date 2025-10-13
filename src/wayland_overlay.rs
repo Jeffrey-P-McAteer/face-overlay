@@ -21,7 +21,6 @@ use wayland_client::{
     protocol::{wl_buffer, wl_output, wl_shm, wl_surface},
     Connection, QueueHandle,
 };
-use crate::mouse_tracker::MouseTracker;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AnchorPosition {
@@ -57,7 +56,7 @@ pub struct WaylandOverlay {
     outputs: HashMap<wl_output::WlOutput, OutputInfo>,
     last_position_change: Instant,
     auto_reposition_interval: Duration,
-    mouse_tracker: MouseTracker,
+    mouse_last_known_pos: std::sync::Arc<std::sync::RwLock<(i32, i32)>>,
     mouse_detection_margin: i32,
     
     // Optimized persistent SHM resource management
@@ -113,6 +112,8 @@ impl WaylandOverlay {
 
         info!("Successfully connected to Wayland compositor with layer shell support");
 
+
+
         let overlay = Self {
             registry_state,
             output_state,
@@ -129,7 +130,7 @@ impl WaylandOverlay {
             outputs: HashMap::new(),
             last_position_change: Instant::now(),
             auto_reposition_interval: Duration::from_secs(2), // Fallback: move every 2 seconds
-            mouse_tracker: MouseTracker::new(),
+            mouse_last_known_pos: std::sync::Arc::new(std::sync::RwLock::new( (-1, -1) )),
             mouse_detection_margin: 25, // Move when mouse is within 50 pixels
             current_shm_fd: None,
             current_buffer_size: 0,
@@ -469,7 +470,8 @@ impl WaylandOverlay {
     /// Check if mouse is near the overlay area
     fn is_mouse_near_overlay(&mut self) -> bool {
         if let Some((x, y, width, height)) = self.get_surface_bounds() {
-            self.mouse_tracker.is_mouse_near_area(x, y, width, height, self.mouse_detection_margin)
+            //self.mouse_tracker.is_mouse_near_area(x, y, width, height, self.mouse_detection_margin)
+            false
         } else {
             false
         }
@@ -477,7 +479,8 @@ impl WaylandOverlay {
 
     fn is_mouse_near_overlay_ap(&mut self, ap: AnchorPosition) -> bool {
         if let Some((x, y, width, height)) = self.get_surface_bounds_ap(ap) {
-            self.mouse_tracker.is_mouse_near_area(x, y, width, height, self.mouse_detection_margin)
+            //self.mouse_tracker.is_mouse_near_area(x, y, width, height, self.mouse_detection_margin)
+            false
         } else {
             false
         }
@@ -499,7 +502,7 @@ impl WaylandOverlay {
     pub fn auto_reposition(&mut self, qh: &QueueHandle<Self>) {
         if self.should_auto_reposition() {
             let is_near_overlay = self.is_mouse_near_overlay();
-            info!("is_near_overlay = {} (mouse pos = {:?})", is_near_overlay, self.mouse_tracker.get_mouse_position());
+            info!("is_near_overlay = {} (mouse pos = {:?})", is_near_overlay, self.mouse_last_known_pos.read().expect("Cold not read mouse_last_known_pos") );
             let new_position = if is_near_overlay {
                 match self.anchor_position { // Flip to opposite side
                     AnchorPosition::LowerLeft => AnchorPosition::LowerRight,
