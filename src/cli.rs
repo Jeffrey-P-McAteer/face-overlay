@@ -14,6 +14,14 @@ pub struct Args {
     pub device: String,
 
     #[arg(
+        short = 'o',
+        long = "output",
+        default_value = "/dev/null",
+        help = "Output Video File"
+    )]
+    pub output: String,
+
+    #[arg(
         short = 'a',
         long = "anchor",
         default_value = "lower-right",
