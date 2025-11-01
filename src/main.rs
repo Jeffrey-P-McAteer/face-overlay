@@ -190,12 +190,15 @@ fn spawn_zoom_input_reader(
                                         evdev::EventSummary::RelativeAxis(ev2, evdev::RelativeAxisCode::REL_DIAL, value) => {
                                             let value_f = value as f32;
                                             let current_zoom = ZOOM_AMOUNT.load(core::sync::atomic::Ordering::Acquire);
-                                            // eprintln!("{}:{} current_zoom={:?}", file!(), line!(), current_zoom);
+                                            eprintln!("{}:{} current_zoom={:?}", file!(), line!(), current_zoom);
                                             let new_zoom = current_zoom + value_f;
                                             if new_zoom >= 0.0 && new_zoom <= 10.0 {
                                                 ZOOM_AMOUNT.store(new_zoom, core::sync::atomic::Ordering::Release);
                                             }
                                         },
+                                        evdev::EventSummary::Key(_event, evdev::KeyCode::BTN_0, 1) => {
+                                            eprintln!("{}:{} Knob Pressed", file!(), line!() );
+                                        }
                                         _ => { /* NOP */ },
                                     }
 
