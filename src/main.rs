@@ -163,21 +163,33 @@ fn spawn_zoom_input_reader(
     cancel_bool: std::sync::Arc<std::sync::atomic::AtomicBool>,
     input_event_file: String,
 ) -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {
-    use event_file_reader::EventFileReader as Reader;
+    use evdev::Device;
     tokio::task::spawn_blocking(move || {
         let mut allowed_errors = 10;
         while allowed_errors > 0 && !cancel_bool.load(std::sync::atomic::Ordering::Relaxed) {
-            match Reader::new(&input_event_file) {
-                Ok(reader) => {
-                    for event in reader {
-                        match event {
-                            Ok(event) => {
-                                eprintln!("{}:{} {:?}", file!(), line!(), event);
-
+            match Device::open(&input_event_file) {
+                Ok(mut device) => {
+                    if let Err(e) = device.set_nonblocking(true) {
+                        eprintln!("{}:{} {:?}", file!(), line!(), e);
+                    }
+                    while allowed_errors > 0 && !cancel_bool.load(std::sync::atomic::Ordering::Relaxed) {
+                        match device.fetch_events() {
+                            Ok(event_stream) => {
+                                for event in event_stream {
+                                    eprintln!("{}:{} {:?}", file!(), line!(), event);
+                                    if cancel_bool.load(std::sync::atomic::Ordering::Relaxed) {
+                                        break;
+                                    }
+                                }
                             }
                             Err(e) => {
-                                allowed_errors -= 1;
-                                eprintln!("{}:{} {:?}", file!(), line!(), e);
+                                if e.kind() == std::io::ErrorKind::WouldBlock {
+                                    // This is fine, continue to next loop iteration.
+                                }
+                                else {
+                                    allowed_errors -= 1;
+                                    eprintln!("{}:{} {:?}", file!(), line!(), e);
+                                }
                             }
                         }
                     }
