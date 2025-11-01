@@ -159,6 +159,39 @@ fn spawn_ai_mask_generation_task(
     })
 }
 
+fn spawn_zoom_input_reader(
+    cancel_bool: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    input_event_file: String,
+) -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {
+    use event_file_reader::EventFileReader as Reader;
+    tokio::task::spawn_blocking(move || {
+        let mut allowed_errors = 10;
+        while allowed_errors > 0 && !cancel_bool.load(std::sync::atomic::Ordering::Relaxed) {
+            match Reader::new(&input_event_file) {
+                Ok(reader) => {
+                    for event in reader {
+                        match event {
+                            Ok(event) => {
+                                eprintln!("{}:{} {:?}", file!(), line!(), event);
+
+                            }
+                            Err(e) => {
+                                allowed_errors -= 1;
+                                eprintln!("{}:{} {:?}", file!(), line!(), e);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    allowed_errors -= 1;
+                    eprintln!("{}:{} {:?}", file!(), line!(), e);
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 async fn run_application(args: Args) -> Result<()> {
     let hf_token = args.hf_token_file.as_ref()
         .and_then(|f| read_hf_token_from_file(f).ok());
@@ -236,6 +269,12 @@ async fn run_application(args: Args) -> Result<()> {
         tx_ai_mask_data,
         args.mask_erosion,
         ai_mask_thread_cancel_bool,
+    );
+
+    let zoom_input_reader_cancel_bool = thread_cancel_bool.clone();
+    let zoom_input_reader_task = spawn_zoom_input_reader(
+        zoom_input_reader_cancel_bool,
+        args.input_events_file
     );
 
     let mut allowed_errors = 10;

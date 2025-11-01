@@ -21,6 +21,15 @@ pub struct Args {
     )]
     pub output: String,
 
+
+    #[arg(
+        short = 'i',
+        long = "input-events",
+        default_value = "/dev/input/by-id/usb-Griffin_Technology__Inc._Griffin_PowerMate-event-if00",
+        help = "Input event file for screen capture zoom"
+    )]
+    pub input_events_file: String,
+
     #[arg(
         short = 'a',
         long = "anchor",
