@@ -202,7 +202,8 @@ impl Args {
             0 => "warn",
             1 => "info", 
             2 => "debug",
-            _ => "trace",
+            //_ => "trace", // Trace is _way_ too noisy
+            _ => "debug",
         };
 
         let subscriber = FmtSubscriber::builder()
@@ -212,8 +213,8 @@ impl Args {
             )
             .with_target(false)
             .with_thread_ids(false)
-            .with_file(false)
-            .with_line_number(false)
+            .with_file(true)
+            .with_line_number(true)
             .finish();
 
         tracing::subscriber::set_global_default(subscriber)

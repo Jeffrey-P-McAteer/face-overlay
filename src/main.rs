@@ -159,9 +159,12 @@ fn spawn_ai_mask_generation_task(
     })
 }
 
+pub static ZOOM_AMOUNT: atomic_float::AtomicF32 = atomic_float::AtomicF32::new(0.0);
+
 fn spawn_zoom_input_reader(
     cancel_bool: std::sync::Arc<std::sync::atomic::AtomicBool>,
     input_event_file: String,
+    verbose: u8,
 ) -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {
     use evdev::Device;
     tokio::task::spawn_blocking(move || {
@@ -176,10 +179,26 @@ fn spawn_zoom_input_reader(
                         match device.fetch_events() {
                             Ok(event_stream) => {
                                 for event in event_stream {
-                                    eprintln!("{}:{} {:?}", file!(), line!(), event);
+                                    if verbose > 2 {
+                                        eprintln!("{}:{} {:?}", file!(), line!(), event);
+                                    }
                                     if cancel_bool.load(std::sync::atomic::Ordering::Relaxed) {
                                         break;
                                     }
+                                    // Process event codes, write to atomic shared data
+                                    match event.destructure() {
+                                        evdev::EventSummary::RelativeAxis(ev2, evdev::RelativeAxisCode::REL_DIAL, value) => {
+                                            let value_f = value as f32;
+                                            let current_zoom = ZOOM_AMOUNT.load(core::sync::atomic::Ordering::Acquire);
+                                            // eprintln!("{}:{} current_zoom={:?}", file!(), line!(), current_zoom);
+                                            let new_zoom = current_zoom + value_f;
+                                            if new_zoom >= 0.0 && new_zoom <= 10.0 {
+                                                ZOOM_AMOUNT.store(new_zoom, core::sync::atomic::Ordering::Release);
+                                            }
+                                        },
+                                        _ => { /* NOP */ },
+                                    }
+
                                 }
                             }
                             Err(e) => {
@@ -289,7 +308,8 @@ async fn run_application(args: Args) -> Result<()> {
     let zoom_input_reader_cancel_bool = thread_cancel_bool.clone();
     let zoom_input_reader_task = spawn_zoom_input_reader(
         zoom_input_reader_cancel_bool,
-        args.input_events_file
+        args.input_events_file,
+        args.verbose
     );
 
     let mut allowed_errors = 10;
