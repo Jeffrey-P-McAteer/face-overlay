@@ -229,6 +229,19 @@ fn spawn_zoom_input_reader(
     })
 }
 
+fn spawn_screen_recorder(
+    cancel_bool: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    output_mkv_file: String,
+    verbose: u8,
+) -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {
+    tokio::task::spawn_blocking(move || {
+
+        // TODO something here to capture screen + mic
+
+        Ok(())
+    })
+}
+
 async fn run_application(args: Args) -> Result<()> {
     let hf_token = args.hf_token_file.as_ref()
         .and_then(|f| read_hf_token_from_file(f).ok());
@@ -312,6 +325,13 @@ async fn run_application(args: Args) -> Result<()> {
     let zoom_input_reader_task = spawn_zoom_input_reader(
         zoom_input_reader_cancel_bool,
         args.input_events_file,
+        args.verbose
+    );
+
+    let screen_recorder_cancel_bool = thread_cancel_bool.clone();
+    let screen_recorder_task = spawn_screen_recorder(
+        screen_recorder_cancel_bool,
+        args.output,
         args.verbose
     );
 
