@@ -190,6 +190,9 @@ fn spawn_zoom_input_reader(
                                     allowed_errors -= 1;
                                     eprintln!("{}:{} {:?}", file!(), line!(), e);
                                 }
+                                if cancel_bool.load(std::sync::atomic::Ordering::Relaxed) {
+                                    break;
+                                }
                             }
                         }
                     }
