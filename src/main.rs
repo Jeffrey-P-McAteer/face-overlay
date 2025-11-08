@@ -305,11 +305,13 @@ fn spawn_screen_recorder(
                 let _ = recording_child.start_kill();
                 let _ = mic_record_child.start_kill();
                 let _ = monitor_record_child.start_kill();
-                // Wait up to 12 seconds, 100ms polls (120 iterations)
-                for _ in 0..120 {
+                // Wait up to 36 seconds, 100ms polls (360 iterations)
+                let mut wl_screenrec_clean_exit = false;
+                for _ in 0..360 {
                     match recording_child.try_wait()? {
                         Some(status) => {
                             println!("wl-screenrec exited with: {}", status);
+                            wl_screenrec_clean_exit = true;
                             break;
                         }
                         None => {
@@ -317,7 +319,9 @@ fn spawn_screen_recorder(
                         }
                     }
                 }
-                println!("WARN: wl-screenrec did not exit quickly enough, continuing...");
+                if ! wl_screenrec_clean_exit {
+                    println!("WARN: wl-screenrec did not exit quickly enough, continuing...");
+                }
                 break;
             }
         }
