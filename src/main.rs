@@ -231,12 +231,121 @@ fn spawn_zoom_input_reader(
 
 fn spawn_screen_recorder(
     cancel_bool: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    input_audio_mic_volume: String,
+    input_audio_mic_device: String,
+    input_audio_monitor_device: String,
     output_mkv_file: String,
     verbose: u8,
 ) -> tokio::task::JoinHandle<Result<(), anyhow::Error>> {
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn(async move {
 
-        // TODO something here to capture screen + mic
+        let output_mkv_path = std::path::PathBuf::from(&output_mkv_file);
+
+        let output_mkv_folder = output_mkv_path.parent().expect("Must have a parent folder!");
+
+        let output_mkv_name_parts = output_mkv_path.file_name().expect("Must have a name!").to_string_lossy();
+        let output_mkv_name_parts = output_mkv_name_parts.split(".").collect::<Vec<_>>();
+        let output_mkv_name = output_mkv_name_parts.split_last().unwrap().1.join(".");
+
+        let mic_recording_file = format!("{}/{}.mic.wav", output_mkv_folder.display(), output_mkv_name);
+        let monitor_recording_file = format!("{}/{}.monitor.wav", output_mkv_folder.display(), output_mkv_name);
+
+        println!("output_mkv_name = {output_mkv_name}");
+        println!("output_mkv_folder = {output_mkv_folder:?}");
+        println!("mic_recording_file = {mic_recording_file}");
+        println!("monitor_recording_file = {monitor_recording_file}");
+
+        // Depends on wl-screenrec (yay -S wl-screenrec)
+        // Get audio devices from 'pactl list short sources'
+        let mut recording_child = tokio::process::Command::new("wl-screenrec")
+            .args(&[
+                "--filename", &output_mkv_file,
+                "--bitrate", "5MB", // Default bitrate
+            ])
+            .spawn()
+            .expect("Could not spawn wl-screenrec");
+
+        let mut mic_record_child = tokio::process::Command::new("pw-record")
+            .args(&[
+                format!("--target={}", input_audio_mic_device),
+                "--volume".to_string(), format!("{}", input_audio_mic_volume),
+                mic_recording_file.clone(),
+            ])
+            .spawn()
+            .expect("Could not spawn pw-record");
+
+        let mut monitor_record_child = tokio::process::Command::new("pw-record")
+            .args(&[
+                format!("--target={}", input_audio_monitor_device),
+                "-P".to_string(),
+                "{ stream.capture.sink=true }".to_string(), // Required for pw-record to open a monitor device
+                monitor_recording_file.clone(),
+            ])
+            .spawn()
+            .expect("Could not spawn pw-record");
+
+        loop {
+            match recording_child.try_wait()? {
+                Some(status) => {
+                    println!("wl-screenrec exited with: {}", status);
+                    let _ = mic_record_child.start_kill();
+                    let _ = monitor_record_child.start_kill();
+                    break;
+                }
+                None => {
+                    // still recording, just wait
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+            if cancel_bool.load(std::sync::atomic::Ordering::Relaxed) {
+                // Tell sub-process to exit nicely
+                let _ = recording_child.start_kill();
+                let _ = mic_record_child.start_kill();
+                let _ = monitor_record_child.start_kill();
+                // Wait up to 12 seconds, 100ms polls (120 iterations)
+                for _ in 0..120 {
+                    match recording_child.try_wait()? {
+                        Some(status) => {
+                            println!("wl-screenrec exited with: {}", status);
+                            break;
+                        }
+                        None => {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+                println!("WARN: wl-screenrec did not exit quickly enough, continuing...");
+                break;
+            }
+        }
+
+        // When we exit attempt to join the .mp3 recordings and the .mkv file to a single output mkv file w/ both audio streams muxed together
+        let output_mp4_file = format!("{}.combine.mp4", &output_mkv_file[0..output_mkv_file.len()-4] );
+        let ffmpeg_args: Vec<String> = vec![
+            "-i".to_string(), output_mkv_file.to_string(),
+            "-i".to_string(), mic_recording_file.to_string(),
+            "-i".to_string(), monitor_recording_file.to_string(),
+            "-filter_complex".to_string(), "[1:a][2:a]amix=inputs=2:duration=longest[aout]".to_string(),
+            "-map".to_string(), "[aout]".to_string(),
+            "-c:v".to_string(), "copy".to_string(),
+            "-c:a".to_string(), "aac".to_string(),
+            "-b:a".to_string(), "320k".to_string(),
+            output_mp4_file,
+        ];
+
+        println!("Joining recorded files together with:");
+        println!("");
+        println!("> ffmpeg {}", ffmpeg_args.join(" "));
+        println!("");
+
+        let mut ffmpeg_proc = tokio::process::Command::new("ffmpeg")
+            .args(&ffmpeg_args)
+            .spawn()
+            .expect("Could not spawn ffmpeg");
+
+        if let Err(e) = ffmpeg_proc.wait().await {
+            eprintln!("Error waiting for ffmpeg_proc = {:?}", e);
+        }
 
         Ok(())
     })
@@ -331,9 +440,22 @@ async fn run_application(args: Args) -> Result<()> {
     let screen_recorder_cancel_bool = thread_cancel_bool.clone();
     let screen_recorder_task = spawn_screen_recorder(
         screen_recorder_cancel_bool,
+        args.input_audio_mic_volume,
+        args.input_audio_mic_device,
+        args.input_audio_monitor_device,
         args.output,
         args.verbose
     );
+
+    let sigint_cancel_bool = thread_cancel_bool.clone();
+    // Spawn a task to handle SIGINT (Ctrl+C)
+    tokio::spawn(async move {
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).expect("Failed to bind SIGINT handler");
+        // Wait for signal
+        sigint.recv().await;
+        println!("SIGINT received, setting sigint_cancel_bool = true");
+        sigint_cancel_bool.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
 
     let mut allowed_errors = 10;
     loop {
@@ -406,9 +528,14 @@ async fn run_application(args: Args) -> Result<()> {
             }
         }
 
-        if webcam_task.is_finished() || slicer_task.is_finished() || ai_mask_task.is_finished() {
+        if webcam_task.is_finished() || slicer_task.is_finished() || ai_mask_task.is_finished() || screen_recorder_task.is_finished() {
             break;
         }
+
+        if thread_cancel_bool.load(std::sync::atomic::Ordering::Relaxed) {
+            break; // ctrl+c or some other event which means main loop ought to exit
+        }
+
     }
 
 
@@ -423,6 +550,19 @@ async fn run_application(args: Args) -> Result<()> {
     }
     if !ai_mask_task.is_finished() {
         ai_mask_task.abort();
+    }
+
+    // Now we wait a bit, reporting status of screen recording
+    println!("Waiting for screen_recorder_task (up to 30s)");
+    for _ in 0..300 {
+        if screen_recorder_task.is_finished() {
+            break;
+        }
+        sleep(Duration::from_millis(110)).await;
+    }
+    if !screen_recorder_task.is_finished() {
+        println!("WARN: Aborting screen_recorder_task!");
+        screen_recorder_task.abort();
     }
 
     Ok(())

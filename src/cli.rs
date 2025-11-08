@@ -21,9 +21,29 @@ pub struct Args {
     )]
     pub output: String,
 
+    #[arg(
+        long = "input-audio-mic-device",
+        default_value = "alsa_input.usb-C-Media_Electronics_Inc._TONOR_TC-777_Audio_Device-00.pro-input-0",
+        help = "Input alsa device name for mic input (output from 'pw-cli list-objects Node | grep -i node.name')"
+    )]
+    pub input_audio_mic_device: String,
 
     #[arg(
-        short = 'i',
+        long = "input-audio-mic-volume",
+        default_value = "1.75",
+        help = "Mic input volume, values above 1.0 are a boost. Default is 1.75"
+    )]
+    pub input_audio_mic_volume: String,
+
+    #[arg(
+        long = "input-audio-monitor-device",
+        default_value = "bluez_output.F4_9D_8A_D2_E3_01.1",
+        help = "Input alsa device name for apps input (output from 'pw-cli list-objects Node | grep -i node.name')"
+    )]
+    pub input_audio_monitor_device: String,
+
+
+    #[arg(
         long = "input-events",
         default_value = "/dev/input/by-id/usb-Griffin_Technology__Inc._Griffin_PowerMate-event-if00",
         help = "Input event file for screen capture zoom"
