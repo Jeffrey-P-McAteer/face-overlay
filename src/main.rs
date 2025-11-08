@@ -398,7 +398,7 @@ fn spawn_screen_recorder(
             "-i".to_string(), output_mkv_file.to_string(),
             "-i".to_string(), mic_recording_file.to_string(),
             "-i".to_string(), monitor_recording_file.to_string(),
-            "-filter_complex".to_string(), "[1:a][2:a]amix=inputs=2:duration=longest[aout]".to_string(),
+            "-filter_complex".to_string(), "[1:a]pan=stereo|c0=c0|c1=c0[left];[2:a]pan=stereo|c0=c0|c1=c0[right];[left][right]amix=inputs=2:duration=longest[aout]".to_string(),
             "-map".to_string(),    "0:v".to_string(),
             "-map".to_string(),    "[aout]".to_string(),
             "-c:v".to_string(),    "libx264".to_string(),
