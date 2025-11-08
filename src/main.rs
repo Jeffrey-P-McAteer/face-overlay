@@ -367,7 +367,9 @@ fn spawn_screen_recorder(
                 .args(&[
                     mic_recording_file.to_string(),
                     cleaned_mic_recording_file.to_string(),
-                    "noisered".to_string(), "session.noise".to_string(), input_audio_noise_reduce_amount.to_string(),
+                    "noisered".to_string(),
+                    input_audio_mic_noise_profile.to_string(),
+                    input_audio_noise_reduce_amount.to_string(),
                 ])
                 .spawn()
                 .expect("Could not spawn sox");

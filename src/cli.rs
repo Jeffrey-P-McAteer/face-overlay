@@ -37,7 +37,7 @@ pub struct Args {
 
     #[arg(
         long = "input-audio-noise-reduce-amount",
-        default_value = "0.4",
+        default_value = "0.006",
         help = "Noise reduction argument passed to sox during post-process of the mic recording."
     )]
     pub input_audio_noise_reduce_amount: String,
