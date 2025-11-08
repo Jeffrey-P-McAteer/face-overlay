@@ -564,8 +564,8 @@ async fn run_application(args: Args) -> Result<()> {
     }
 
     // Now we wait a bit, reporting status of screen recording
-    println!("Waiting for screen_recorder_task (up to 30s)");
-    for _ in 0..300 {
+    println!("Waiting for screen_recorder_task (up to 120s)");
+    for _ in 0..1200 {
         if screen_recorder_task.is_finished() {
             break;
         }
