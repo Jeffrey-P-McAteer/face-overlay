@@ -39,10 +39,13 @@ fn load_model(path: &std::path::Path, model_type: ModelType) -> Option<Segmentat
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 6)]
 async fn main() -> Result<()> {
-    let args = Args::parse_args();
+    let mut args = Args::parse_args();
     args.setup_logging();
 
     info!("Starting face-overlay application");
+    if args.no_flip {
+        args.flip = false; // args.no_flip overrides flip
+    }
     if args.flip {
         info!("Camera input will be flipped horizontally (mirror effect)");
     }

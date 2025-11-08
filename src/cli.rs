@@ -119,27 +119,34 @@ pub struct Args {
 
     #[arg(
         long = "flip",
+        default_value = "true",
         help = "Flip the camera input horizontally (mirror effect)"
     )]
     pub flip: bool,
 
     #[arg(
+        long = "no-flip",
+        help = "reverse of --flip"
+    )]
+    pub no_flip: bool,
+
+    #[arg(
         long = "mask-erosion",
-        default_value = "0",
+        default_value = "1",
         help = "Erode (clip inwards) the AI mask by this many pixels (0-5)"
     )]
     pub mask_erosion: u8,
 
     #[arg(
         long = "border-width",
-        default_value = "0",
+        default_value = "1",
         help = "Width of the border outline around visible pixels (0 = no border)"
     )]
     pub border_width: u32,
 
     #[arg(
         long = "border-color",
-        default_value = "#ffffff",
+        default_value = "#101010",
         help = "Color of the border outline in #RRGGBB format"
     )]
     pub border_color: String,
