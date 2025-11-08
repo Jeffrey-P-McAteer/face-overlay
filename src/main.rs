@@ -319,17 +319,24 @@ fn spawn_screen_recorder(
             }
         }
 
+        // Just for giggles, in case the above processes still have stray writes
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
         // When we exit attempt to join the .mp3 recordings and the .mkv file to a single output mkv file w/ both audio streams muxed together
         let output_mp4_file = format!("{}.combine.mp4", &output_mkv_file[0..output_mkv_file.len()-4] );
         let ffmpeg_args: Vec<String> = vec![
+            "-y".to_string(), // Overwrite existing outputs
             "-i".to_string(), output_mkv_file.to_string(),
             "-i".to_string(), mic_recording_file.to_string(),
             "-i".to_string(), monitor_recording_file.to_string(),
             "-filter_complex".to_string(), "[1:a][2:a]amix=inputs=2:duration=longest[aout]".to_string(),
-            "-map".to_string(), "[aout]".to_string(),
-            "-c:v".to_string(), "copy".to_string(),
-            "-c:a".to_string(), "aac".to_string(),
-            "-b:a".to_string(), "320k".to_string(),
+            "-map".to_string(),    "0:v".to_string(),
+            "-map".to_string(),    "[aout]".to_string(),
+            "-c:v".to_string(),    "libx264".to_string(),
+            "-preset".to_string(), "veryfast".to_string(),
+            "-crf".to_string(),    "21".to_string(), // lower for higher quality (e.g., 18–20).
+            "-c:a".to_string(),    "aac".to_string(),
+            "-b:a".to_string(),    "320k".to_string(),
             output_mp4_file,
         ];
 
