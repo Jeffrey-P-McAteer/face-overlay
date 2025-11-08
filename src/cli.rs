@@ -30,8 +30,8 @@ pub struct Args {
 
     #[arg(
         long = "input-audio-mic-volume",
-        default_value = "2.5",
-        help = "Mic input volume, values above 1.0 are a boost. Default is 2.5"
+        default_value = "4.2",
+        help = "Mic input volume, values above 1.0 are a boost. Default is 4.2"
     )]
     pub input_audio_mic_volume: String,
 
