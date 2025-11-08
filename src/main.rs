@@ -81,10 +81,8 @@ async fn main() -> Result<()> {
 
     if let Err(e) = result {
         error!("Application error: {:#}", e);
-        println!("Output is at {}", args.output);
         std::process::exit(1);
     }
-    println!("Output is at {}", args.output);
 
     Ok(())
 }
@@ -265,6 +263,8 @@ fn spawn_screen_recorder(
     cancel_bool: std::sync::Arc<std::sync::atomic::AtomicBool>,
     input_audio_mic_volume: String,
     input_audio_mic_device: String,
+    input_audio_mic_noise_profile: String,
+    input_audio_noise_reduce_amount: String,
     input_audio_monitor_device: String,
     output_mkv_file: String,
     verbose: u8,
@@ -279,8 +279,9 @@ fn spawn_screen_recorder(
         let output_mkv_name_parts = output_mkv_name_parts.split(".").collect::<Vec<_>>();
         let output_mkv_name = output_mkv_name_parts.split_last().unwrap().1.join(".");
 
-        let mic_recording_file = format!("{}/{}.mic.wav", output_mkv_folder.display(), output_mkv_name);
-        let monitor_recording_file = format!("{}/{}.monitor.wav", output_mkv_folder.display(), output_mkv_name);
+        let mic_recording_file = format!("{}/{}.mic.wav", output_mkv_folder.display(), &output_mkv_name);
+        let monitor_recording_file = format!("{}/{}.monitor.wav", output_mkv_folder.display(), &output_mkv_name);
+        let cleaned_mic_recording_file = format!("{}/{}.mic.clean.wav", output_mkv_folder.display(), &output_mkv_name);
 
         println!("output_mkv_name = {output_mkv_name}");
         println!("output_mkv_folder = {output_mkv_folder:?}");
@@ -358,6 +359,35 @@ fn spawn_screen_recorder(
         // Just for giggles, in case the above processes still have stray writes
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
+        let mic_recording_file = if std::path::Path::new(&input_audio_mic_noise_profile).exists() {
+            // Clean audio w/ noiseprofile
+            println!("Using {} to clean noise from audio with reduction factor of {}", &input_audio_mic_noise_profile, &input_audio_noise_reduce_amount);
+
+            let mut sox_proc = tokio::process::Command::new("sox")
+                .args(&[
+                    mic_recording_file.to_string(),
+                    cleaned_mic_recording_file.to_string(),
+                    "noisered".to_string(), "session.noise".to_string(), input_audio_noise_reduce_amount.to_string(),
+                ])
+                .spawn()
+                .expect("Could not spawn sox");
+
+            if let Err(e) = sox_proc.wait().await {
+                eprintln!("Error waiting for ffmpeg_proc = {:?}", e);
+            }
+
+            // Finally overwrite our variable value for mic_recording_file IF the cleaned one now exists
+            if std::path::Path::new(&cleaned_mic_recording_file).exists() {
+                cleaned_mic_recording_file
+            }
+            else {
+                mic_recording_file
+            }
+        }
+        else {
+            mic_recording_file
+        };
+
         // When we exit attempt to join the .mp3 recordings and the .mkv file to a single output mkv file w/ both audio streams muxed together
         let output_mp4_file = format!("{}.combine.mp4", &output_mkv_file[0..output_mkv_file.len()-4] );
         let ffmpeg_args: Vec<String> = vec![
@@ -396,6 +426,76 @@ fn spawn_screen_recorder(
 }
 
 async fn run_application(args: &Args) -> Result<()> {
+
+    // Parse sub-command options first
+    if args.action_record_input_audio_mic_noise_profile > 0 {
+        println!("Recording {}s of noise from {} to {}", args.action_record_input_audio_mic_noise_profile, args.input_audio_mic_device, args.input_audio_mic_noise_profile);
+
+        const NOISE_TEMP_WAV_FILE: &'static str = "/tmp/face-overlay-noise.wav";
+
+        let mut mic_record_child = tokio::process::Command::new("pw-record")
+            .args(&[
+                format!("--target={}", &args.input_audio_mic_device),
+                "--volume".to_string(), format!("{}", &args.input_audio_mic_volume),
+                NOISE_TEMP_WAV_FILE.to_string(),
+            ])
+            .spawn()
+            .expect("Could not spawn pw-record");
+
+        for _ in 0..2 {
+            let mut proc_exited = false;
+            for _ in 0..args.action_record_input_audio_mic_noise_profile {
+                match mic_record_child.try_wait()? {
+                    Some(status) => {
+                        proc_exited = true;
+                        break;
+                    }
+                    None => {
+                        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                        println!("*");
+                    }
+                }
+            }
+            if !proc_exited {
+                let _ = mic_record_child.start_kill();
+            }
+        }
+
+        println!("Done recording noise, see {}", NOISE_TEMP_WAV_FILE);
+
+        // Recording process is dead
+        let mut sox_noise_proc = tokio::process::Command::new("sox")
+            .args(&[
+                NOISE_TEMP_WAV_FILE.to_string(),
+                "-n".to_string(),  "trim".to_string(),  "0".to_string(), "10".to_string(),
+                "noiseprof".to_string(),
+                args.input_audio_mic_noise_profile.to_string(),
+            ])
+            .spawn()
+            .expect("Could not spawn sox");
+
+        let mut proc_exited = false;
+        for _ in 0..360 {
+            match mic_record_child.try_wait()? {
+                Some(status) => {
+                    proc_exited = true;
+                    break;
+                }
+                None => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+        if !proc_exited {
+            let _ = sox_noise_proc.start_kill();
+        }
+
+        println!("Done creating profile, see {}", args.input_audio_mic_noise_profile);
+
+        return Ok(());
+    }
+
+
     let hf_token = args.hf_token_file.as_ref()
         .and_then(|f| read_hf_token_from_file(f).ok());
 
@@ -486,6 +586,8 @@ async fn run_application(args: &Args) -> Result<()> {
         screen_recorder_cancel_bool,
         args.input_audio_mic_volume.clone(),
         args.input_audio_mic_device.clone(),
+        args.input_audio_mic_noise_profile.clone(),
+        args.input_audio_noise_reduce_amount.clone(),
         args.input_audio_monitor_device.clone(),
         args.output.clone(),
         args.verbose

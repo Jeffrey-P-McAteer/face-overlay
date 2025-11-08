@@ -36,6 +36,26 @@ pub struct Args {
     pub input_audio_mic_volume: String,
 
     #[arg(
+        long = "input-audio-noise-reduce-amount",
+        default_value = "0.4",
+        help = "Noise reduction argument passed to sox during post-process of the mic recording."
+    )]
+    pub input_audio_noise_reduce_amount: String,
+
+    #[arg(
+        long = "record-noise-profile",
+        default_value = "0",
+        help = "Records N seconds of sound from --input-audio-mic-device and creates a noise profile from is using sox, output to --mic-noise-profile"
+    )]
+    pub action_record_input_audio_mic_noise_profile: usize,
+    #[arg(
+        long = "mic-noise-profile",
+        default_value = "/j/.cache/face-overlay-sox-noise-profile.noise",
+        help = "Mic noise profile created by sox. Pass --record-noise-profile to create using microphone input."
+    )]
+    pub input_audio_mic_noise_profile: String,
+
+    #[arg(
         long = "input-audio-monitor-device",
         default_value = "bluez_output.F4_9D_8A_D2_E3_01.1",
         help = "Input alsa device name for apps input (output from 'pw-cli list-objects Node | grep -i node.name')"
