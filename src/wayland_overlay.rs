@@ -1,3 +1,6 @@
+
+#![allow(unused_variables, unused_mut, dead_code)]
+
 use anyhow::{Context, Result};
 use image::{ImageBuffer, Rgba};
 use smithay_client_toolkit::{
