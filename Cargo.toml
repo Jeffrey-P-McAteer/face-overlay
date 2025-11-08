@@ -53,6 +53,7 @@ tempfile = "3.8"
 
 evdev = "0.13"
 atomic_float = "1"
+chrono = "*"
 
 [profile.release]
 debug = true

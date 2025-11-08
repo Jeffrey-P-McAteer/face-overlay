@@ -36,6 +36,9 @@ fn load_model(path: &std::path::Path, model_type: ModelType) -> Option<Segmentat
     }
 }
 
+const SCRATCH_SCREEN_RECORDINGS: &'static str = "/mnt/scratch/screen-recordings";
+const DOWNLOADS_SCREEN_RECORDINGS: &'static str = "/j/downloads/screen-recordings";
+
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 6)]
 async fn main() -> Result<()> {
@@ -50,12 +53,38 @@ async fn main() -> Result<()> {
         info!("Camera input will be flipped horizontally (mirror effect)");
     }
 
-    let result = run_application(args).await;
+    if args.output == "/dev/null" {
+        // Override w/ timestamped folder + child files
+        let screen_recordings_folder = if std::path::Path::new(SCRATCH_SCREEN_RECORDINGS).exists() {
+            SCRATCH_SCREEN_RECORDINGS
+        }
+        else {
+            std::fs::create_dir_all(DOWNLOADS_SCREEN_RECORDINGS).expect("Failed to create downloads-folder recordings dir");
+            DOWNLOADS_SCREEN_RECORDINGS
+        };
+        let now = chrono::Local::now();
+        let today_date = now.date_naive().format("%Y-%m-%d").to_string();
+        let today_time = now.time().format("%H_%M_%S").to_string();
+
+        let today_folder = format!("{}/{}", screen_recordings_folder, today_date);
+        std::fs::create_dir_all(&today_folder).expect("Failed to create today recordings dir");
+
+        let output_mkv_file = format!("{}/{}.mkv", today_folder, today_time);
+
+        // Overwrite empty output w/ scratch or downloads folder
+        args.output = output_mkv_file;
+    }
+
+    println!("Writing to {}", args.output);
+
+    let result = run_application(&args).await;
 
     if let Err(e) = result {
         error!("Application error: {:#}", e);
+        println!("Output is at {}", args.output);
         std::process::exit(1);
     }
+    println!("Output is at {}", args.output);
 
     Ok(())
 }
@@ -366,7 +395,7 @@ fn spawn_screen_recorder(
     })
 }
 
-async fn run_application(args: Args) -> Result<()> {
+async fn run_application(args: &Args) -> Result<()> {
     let hf_token = args.hf_token_file.as_ref()
         .and_then(|f| read_hf_token_from_file(f).ok());
 
@@ -448,17 +477,17 @@ async fn run_application(args: Args) -> Result<()> {
     let zoom_input_reader_cancel_bool = thread_cancel_bool.clone();
     let zoom_input_reader_task = spawn_zoom_input_reader(
         zoom_input_reader_cancel_bool,
-        args.input_events_file,
+        args.input_events_file.clone(),
         args.verbose
     );
 
     let screen_recorder_cancel_bool = thread_cancel_bool.clone();
     let screen_recorder_task = spawn_screen_recorder(
         screen_recorder_cancel_bool,
-        args.input_audio_mic_volume,
-        args.input_audio_mic_device,
-        args.input_audio_monitor_device,
-        args.output,
+        args.input_audio_mic_volume.clone(),
+        args.input_audio_mic_device.clone(),
+        args.input_audio_monitor_device.clone(),
+        args.output.clone(),
         args.verbose
     );
 
