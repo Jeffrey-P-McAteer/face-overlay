@@ -411,7 +411,15 @@ fn spawn_screen_recorder(
 
         println!("Joining recorded files together with:");
         println!("");
-        println!("> ffmpeg {}", ffmpeg_args.join(" "));
+        let quoted_args = ffmpeg_args.clone().into_iter().map(|arg| {
+            if arg.contains('[') || arg.contains(' ') {
+                format!("'{}'", arg)
+            }
+            else {
+                arg
+            }
+        }).collect::<Vec<_>>();
+        println!("> ffmpeg {}", quoted_args.join(" "));
         println!("");
 
         let mut ffmpeg_proc = tokio::process::Command::new("ffmpeg")
