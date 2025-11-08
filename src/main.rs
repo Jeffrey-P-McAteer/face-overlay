@@ -326,6 +326,7 @@ fn spawn_screen_recorder(
         let output_mp4_file = format!("{}.combine.mp4", &output_mkv_file[0..output_mkv_file.len()-4] );
         let ffmpeg_args: Vec<String> = vec![
             "-y".to_string(), // Overwrite existing outputs
+            "-loglevel".to_string(), "error".to_string(),
             "-i".to_string(), output_mkv_file.to_string(),
             "-i".to_string(), mic_recording_file.to_string(),
             "-i".to_string(), monitor_recording_file.to_string(),
