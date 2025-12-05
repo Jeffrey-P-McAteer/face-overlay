@@ -611,7 +611,16 @@ async fn run_application(args: &Args) -> Result<()> {
         sigint.recv().await;
         println!("SIGINT received, setting sigint_cancel_bool = true");
         sigint_cancel_bool.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Turn off light via ykushcmd -d 1
+        let _ = tokio::process::Command::new("ykushcmd")
+            .args(&["-d", "1"])
+            .spawn();
     });
+
+    // Turn on light via ykushcmd -u 1
+    let _ = tokio::process::Command::new("ykushcmd")
+        .args(&["-u", "1"])
+        .spawn();
 
     let mut allowed_errors = 10;
     loop {
@@ -707,6 +716,11 @@ async fn run_application(args: &Args) -> Result<()> {
     if !ai_mask_task.is_finished() {
         ai_mask_task.abort();
     }
+
+    // Turn off light via ykushcmd -d 1
+    let _ = tokio::process::Command::new("ykushcmd")
+        .args(&["-d", "1"])
+        .spawn();
 
     // Now we wait a bit, reporting status of screen recording
     println!("Waiting for screen_recorder_task (up to 120s)");
